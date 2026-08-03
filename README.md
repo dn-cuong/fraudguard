@@ -1,122 +1,103 @@
 # FraudGuard
 
-FraudGuard scores card payments for fraud risk in real time. A payment comes in, the system checks a few signals, and it returns one of three outcomes: allow it, send it for review, or decline it.
+![FraudGuard system architecture](images/architecture.png)
 
-Under the hood this is a distributed backend on AWS. Several workers can score traffic at once, but they still reach the same answer because they share Redis velocity counters and DynamoDB history instead of keeping private state in memory.
+Distributed real-time fraud scoring pipeline on AWS. Payments enter through API Gateway into Kinesis; Go workers on EC2 apply shared rule checks using ElastiCache (Redis) velocity counters and DynamoDB transaction history, then expose the decision over `GET /payments/{txn_id}`.
 
-| Decision | What it means |
-|----------|---------------|
-| `ALLOW` | Looks fine. Let it through. |
-| `REVIEW` | Looks off. Have someone take a look. |
-| `DECLINE` | Too risky. Block it. |
+| Decision | Meaning |
+|----------|---------|
+| `ALLOW` | Pass |
+| `REVIEW` | Flag for manual review |
+| `DECLINE` | Block |
 
-What I aimed for:
-
-- Median scoring under 80ms under load
-- 1,000+ TPS in the local load test
-- Consistent decisions across workers
-- Infra in Terraform, workers shipped with Ansible, health via CloudWatch
+**Targets:** sub-80ms median scoring latency under load, 1,000+ TPS in local loadgen, consistent decisions across workers via shared Redis/DynamoDB state. Infra is Terraform; workers deploy with Ansible; CloudWatch alarms watch worker heartbeats.
 
 ---
 
-## Why build this?
+## Problem
 
-Checkout is fast. Fraud checks that lag behind make the product feel broken.
+Authorization paths need a fast risk decision. A single scorer does not survive burst traffic, and if each replica keeps velocity state in local memory, replicas diverge under concurrency.
 
-One server eventually falls over when traffic spikes. Many servers sound better, until each one tracks “how many times this card paid recently” in its own memory. Then they disagree. One box allows a charge another would have stopped.
+FraudGuard keeps workers **stateless**:
 
-FraudGuard’s approach is simple:
+1. Ingest via public API Gateway (`POST /payments`)
+2. Fan-out on Kinesis (partition key = `card_id`)
+3. Score with shared Redis + DynamoDB + pure rules
+4. Persist the decision; clients poll `GET /payments/{txn_id}`
 
-1. Take payments in through a public API
-2. Drop them on a stream so work can fan out
-3. Score with shared rules and shared storage
-4. Save the decision so you can audit it later
-
-This is not a bank product and not an ML model. It’s a backend systems project: streaming, shared state, rule scoring, and cloud ops.
+This is a backend systems project (streaming, shared state, ops). It is not a full bank product and not an ML model.
 
 ---
 
 ## Architecture
 
-![FraudGuard system architecture](images/architecture.png)
+### Data path
 
-### What happens to a payment
+1. **Client → API Gateway** over HTTPS (`POST /payments`).
+2. **API Gateway → Kinesis** (`PutRecord`). Same `card_id` stays on one partition for ordering; different cards fan out across shards.
+3. **EC2 Go workers** poll shards and score through a goroutine pool + channel.
+4. **Shared state before decide**
+   - Redis / ElastiCache: velocity windows (`vel:card:*`, `vel:ip:*`)
+   - DynamoDB: durable history / dispute lookup
+5. **Rule engine** produces ALLOW / REVIEW / DECLINE and writes the txn record.
+6. **Client polls** `GET /payments/{txn_id}`
+   - `pending` while scoring
+   - `scored` with `decision` + `score`
+7. **CloudWatch** `WorkerHeartbeat` metrics; missing heartbeats trip failover alarms.
 
-1. **Something sends a payment.** A merchant backend, or you with `curl`, hits Amazon API Gateway over HTTPS.
+### Async ingest
 
-2. **API Gateway puts it on Kinesis.** Think of Kinesis as a busy conveyor belt. Same card goes down the same lane (`card_id` partition key) so related activity stays ordered.
+`POST /payments` returns quickly:
 
-3. **Go workers on EC2 pick it up.** Each worker runs a pool of goroutines so it can score many payments in parallel.
+```json
+{"status":"queued","txn_id":"...","poll":"/payments/..."}
+```
 
-4. **It checks shared state before deciding.**
-   - Redis (ElastiCache): how chatty this card or IP has been in the last minute
-   - DynamoDB: whether the card has dispute / fraud history
+That only means the event is on the stream. The decision comes from `GET /payments/{txn_id}` (DynamoDB GSI on `txn_id`). Local **score mode** can still return the decision inline for faster demos; polling works locally at `GET /v1/payments/{txn_id}` as well.
 
-5. **Rules turn that into a score.** Points add up into ALLOW, REVIEW, or DECLINE, then the result is written to DynamoDB.
+### Why Redis + DynamoDB
 
-6. **You ask for the result.** `POST` only says `queued` and gives you a `txn_id`. Then call `GET /payments/{txn_id}`:
-   - `pending` → still scoring
-   - `scored` → includes `decision` and `score`
+| Store | Role |
+|-------|------|
+| **ElastiCache Redis** | Hot velocity counters with TTL (sub-ms reads under burst) |
+| **DynamoDB** | Durable txn history + dispute flag (system of record) |
 
-7. **Workers keep a heartbeat in CloudWatch.** If the heartbeat stops, an alarm fires.
-
-### About the async API
-
-On AWS, `POST /payments` comes back fast with `queued` plus a `txn_id`. That only means the payment entered the pipeline. To see ALLOW / REVIEW / DECLINE, poll `GET /payments/{txn_id}`. You don’t need the DynamoDB console for day-to-day checks.
-
-That’s on purpose: keep the front door fast, let workers score in the background. Locally you can also run **score mode**, which returns the decision in the same response. Polling still works locally at `GET /v1/payments/{txn_id}`.
-
-### Why Redis and DynamoDB?
-
-| Store | Job | Rough analogy |
-|-------|-----|---------------|
-| Redis / ElastiCache | Hot, short-lived counters | A whiteboard of “how busy is this card right now?” |
-| DynamoDB | Durable history | A filing cabinet of past txns and disputes |
-
-Workers are stateless. If they only trusted their own RAM, replicas would drift under burst traffic.
+Replicas stay consistent because scoring depends on shared stores, not process-local RAM.
 
 ---
 
 ## Rules (v1)
 
-| Rule | Watches | Lives in |
-|------|---------|----------|
-| `AMOUNT_HIGH` | Amount over threshold (default $2,500) | Config |
-| `VELOCITY_CARD` | Too many txns on one card in a short window | Redis |
-| `VELOCITY_IP` | Too many txns from one IP in a short window | Redis |
-| `HISTORY_DISPUTE` | Prior dispute / fraud flag on the card | DynamoDB |
+| Rule | Signal | Store |
+|------|--------|-------|
+| `AMOUNT_HIGH` | amount ≥ threshold (default $2500) | config |
+| `VELOCITY_CARD` | N txns / card / window | Redis |
+| `VELOCITY_IP` | N txns / IP / window | Redis |
+| `HISTORY_DISPUTE` | prior dispute on card | DynamoDB |
 
-Scoring:
-
-- ≥ 80 → `DECLINE`
-- ≥ 40 → `REVIEW`
-- else → `ALLOW`
-
-Same payment + same Redis/DynamoDB snapshot ⇒ same decision on every worker.
+Score stack: ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over `(payment, snapshot)` so any worker with the same snapshot scores the same way.
 
 ---
 
-## Repo layout
+## Layout
 
-| Path | What’s in it |
-|------|--------------|
-| `cmd/ingest` | HTTP entrypoint (local score mode or push to Kinesis) |
-| `cmd/worker` | Kinesis consumer that scores on EC2 |
-| `cmd/loadgen` | Throughput / latency harness |
-| `internal/` | Rules, Redis, DynamoDB, stream helpers, scorer |
-| `config/` | Sample local and AWS config |
-| `terraform/` | VPC, API Gateway, Kinesis, Redis, DynamoDB, EC2, alarms |
-| `ansible/` | Install worker binary + systemd |
-| `images/` | Architecture diagram |
-| `scripts/` | Smoke / LocalStack helpers |
+| Path | Role |
+|------|------|
+| `cmd/ingest` | HTTP ingest (score mode or Kinesis put) + status poll |
+| `cmd/worker` | Kinesis consumer (goroutine pool) |
+| `cmd/loadgen` | TPS / p50 / p99 harness |
+| `internal/` | engine, velocity, history, stream, scorer, cloudwatch |
+| `config/` | `local.yaml`, `aws.yaml` |
+| `terraform/` | VPC, API Gateway, Kinesis, ElastiCache, DynamoDB, EC2, alarms |
+| `ansible/` | worker binary + systemd |
+| `images/` | architecture diagram |
+| `scripts/` | smoke / LocalStack helpers |
 
 ---
 
-## Run it locally first
+## Local
 
-You don’t need AWS to try the scoring path. Docker covers Redis and DynamoDB Local.
-
-Needs Go 1.22+ and Docker Desktop running.
+Needs Go 1.22+ and Docker Desktop.
 
 ```bash
 docker compose up -d redis dynamodb
@@ -124,7 +105,7 @@ make build
 ./bin/ingest -config config/local.yaml -mode score
 ```
 
-Normal payment (expect `ALLOW`):
+Normal payment (`ALLOW`):
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/payments \
@@ -132,7 +113,7 @@ curl -s -X POST http://localhost:8080/v1/payments \
   -d '{"card_id":"card-1","user_id":"u1","amount":42,"merchant":"Cafe","country":"US","ip":"1.2.3.4"}'
 ```
 
-High amount (expect `REVIEW` from `AMOUNT_HIGH`):
+High amount (`REVIEW` / `AMOUNT_HIGH`):
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/payments \
@@ -140,36 +121,33 @@ curl -s -X POST http://localhost:8080/v1/payments \
   -d '{"card_id":"card-hot","user_id":"u2","amount":3000,"merchant":"Luxury","country":"US","ip":"9.9.9.9"}'
 ```
 
-In score mode the decision is already in the POST body. You can also fetch it later:
+Poll by `txn_id`:
 
 ```bash
-# swap in the txn_id from the POST response
 curl -s http://localhost:8080/v1/payments/TXN_ID
 ```
 
-Load test (~1k TPS):
+Loadgen (1k TPS):
 
 ```bash
 ./bin/loadgen -addr http://localhost:8080 -tps 1000 -duration 15s -workers 64
 ```
 
-Handy Make targets:
-
 ```bash
-make test   # rule engine unit tests
-make up     # start Redis + DynamoDB Local
-make down   # stop containers
+make test   # rule unit tests
+make up     # redis + dynamodb-local
+make down
 ```
 
 ---
 
-## Deploy on AWS
+## AWS
 
-This brings up the real pipeline: API Gateway, Kinesis, ElastiCache, DynamoDB, EC2 workers, a bastion for SSH, and CloudWatch alarms.
+Provisions API Gateway, Kinesis, ElastiCache, DynamoDB (+ `txn_id-index` GSI), EC2 workers, bastion, CloudWatch.
 
-Heads up on cost: NAT Gateway and ElastiCache add up quickly. For a demo, apply, test, then destroy in the same sitting.
+**Cost:** NAT + ElastiCache dominate. Apply → smoke → `terraform destroy` in one sitting for demos.
 
-### 1. Tools and AWS login
+### 1. Tooling
 
 ```bash
 brew install awscli terraform ansible
@@ -183,23 +161,21 @@ aws sts get-caller-identity
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars   # set key_name
-terraform init
-terraform apply
+terraform init && terraform apply
 terraform output payments_url
+terraform output payment_status_url_template
 ```
 
 ### 3. Workers
 
 ```bash
-# from repo root
 GOOS=linux GOARCH=amd64 go build -o bin/worker ./cmd/worker
-
 cd ansible
-cp inventory.example.yml inventory.yml         # fill from terraform output
+cp inventory.example.yml inventory.yml         # from terraform outputs
 ansible-playbook -i inventory.yml site.yml --private-key ~/.ssh/fraudguard.pem
 ```
 
-### 4. Hit it like a user
+### 4. Client flow
 
 ```bash
 BASE="$(cd terraform && terraform output -raw payments_url)"
@@ -207,27 +183,25 @@ BASE="$(cd terraform && terraform output -raw payments_url)"
 curl -s -X POST "$BASE" \
   -H 'Content-Type: application/json' \
   -d '{"card_id":"card-1","user_id":"u1","amount":42,"merchant":"Cafe","country":"US","ip":"1.2.3.4"}'
-
 # {"status":"queued","txn_id":"...","poll":"/payments/..."}
 
 curl -s "$BASE/TXN_ID"
-# {"status":"scored","decision":"ALLOW","score":0, ...}
+# {"status":"scored","decision":"ALLOW","score":0,...}
 ```
 
-### 5. Shut it down
+### 5. Teardown
 
 ```bash
-cd terraform
-terraform destroy
+cd terraform && terraform destroy
 ```
 
 ---
 
 ## Safety
 
-- Don’t commit `.env`, real `*.tfvars`, access-key CSVs, or private keys
-- Tear the stack down when you’re done
-- Tag resources with `Project=fraudguard` so cleanup is easy
+- Do not commit `.env`, real `*.tfvars`, access-key CSVs, or PEM keys
+- Destroy idle stacks
+- Tag resources `Project=fraudguard`
 
 ## License
 
