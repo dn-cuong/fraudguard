@@ -50,7 +50,10 @@ resource "aws_iam_role_policy" "worker" {
           "dynamodb:UpdateItem",
           "dynamodb:DescribeTable"
         ]
-        Resource = aws_dynamodb_table.transactions.arn
+        Resource = [
+          aws_dynamodb_table.transactions.arn,
+          "${aws_dynamodb_table.transactions.arn}/index/*",
+        ]
       },
       {
         Effect   = "Allow"

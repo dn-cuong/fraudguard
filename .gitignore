@@ -16,6 +16,10 @@ vendor/
 *.key
 credentials.json
 secrets/
+access-key.csv
+*accessKeys.csv
+*_accessKeys.csv
+INTERVIEW.md
 
 # Terraform state & local overrides
 *.tfvars

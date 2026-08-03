@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
+	"github.com/google/uuid"
 	"github.com/mit/fraudguard/internal/payment"
 	"github.com/mit/fraudguard/internal/scorer"
 )
@@ -24,13 +26,25 @@ type Config struct {
 }
 
 func NewClient(cfg Config) *kinesis.Client {
-	awsCfg := aws.Config{Region: cfg.Region}
 	opts := []func(*kinesis.Options){}
+	var awsCfg aws.Config
+
 	if cfg.Endpoint != "" {
-		awsCfg.Credentials = credentials.NewStaticCredentialsProvider("local", "local", "")
+		awsCfg = aws.Config{
+			Region:      cfg.Region,
+			Credentials: credentials.NewStaticCredentialsProvider("local", "local", ""),
+		}
 		opts = append(opts, func(o *kinesis.Options) {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 		})
+	} else {
+		loaded, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(cfg.Region))
+		if err != nil {
+			slog.Error("load aws config", "err", err)
+			awsCfg = aws.Config{Region: cfg.Region}
+		} else {
+			awsCfg = loaded
+		}
 	}
 	return kinesis.NewFromConfig(awsCfg, opts...)
 }
@@ -181,6 +195,12 @@ func (w *Worker) pollShard(ctx context.Context, shardID string, jobs chan<- paym
 			if err := json.Unmarshal(rec.Data, &p); err != nil {
 				w.errors.Add(1)
 				continue
+			}
+			if p.TxnID == "" {
+				p.TxnID = uuid.NewString()
+			}
+			if p.Timestamp.IsZero() {
+				p.Timestamp = time.Now().UTC()
 			}
 			select {
 			case jobs <- p:

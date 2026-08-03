@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mit/fraudguard/internal/cloudwatchx"
 	"github.com/mit/fraudguard/internal/config"
 	"github.com/mit/fraudguard/internal/engine"
 	"github.com/mit/fraudguard/internal/heartbeat"
@@ -48,6 +49,7 @@ func main() {
 
 	worker := stream.NewWorker(client, cfg.Kinesis.StreamName, cfg.WorkerName, cfg.WorkerCount, svc)
 	rep := heartbeat.New(cfg.WorkerName)
+	cw := cloudwatchx.New(ctx, cfg.Kinesis.Region, cfg.WorkerName)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -75,6 +77,7 @@ func main() {
 			case <-t.C:
 				scored, errs, avgMs := worker.Stats()
 				rep.Set(scored, errs, avgMs)
+				cw.Beat(ctx)
 				slog.Info("heartbeat", "scored", scored, "errors", errs, "avg_latency_ms", avgMs)
 			}
 		}

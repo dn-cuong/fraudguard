@@ -28,21 +28,19 @@ func main() {
 
 	cfg, err := config.Load(*cfgPath)
 	must(err)
-	engCfg, err := cfg.EngineConfig()
-	must(err)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	vel := velocity.New(cfg.RedisAddr)
-	must(vel.Ping(ctx))
+	// History is always needed so clients can poll GET /v1/payments/{txn_id}.
 	hist := history.New(cfg.HistoryConfig())
 	must(hist.EnsureTable(ctx))
 
-	svc := scorer.New(engine.New(engCfg), vel, hist, engCfg)
-
+	var svc *scorer.Service
 	var producer *stream.Producer
-	if *mode == "kinesis" {
+
+	switch *mode {
+	case "kinesis":
 		client := stream.NewClient(stream.Config{
 			Region:     cfg.Kinesis.Region,
 			StreamName: cfg.Kinesis.StreamName,
@@ -50,6 +48,12 @@ func main() {
 		})
 		must(stream.EnsureStream(ctx, client, cfg.Kinesis.StreamName, 2))
 		producer = stream.NewProducer(client, cfg.Kinesis.StreamName)
+	default:
+		engCfg, err := cfg.EngineConfig()
+		must(err)
+		vel := velocity.New(cfg.RedisAddr)
+		must(vel.Ping(ctx))
+		svc = scorer.New(engine.New(engCfg), vel, hist, engCfg)
 	}
 
 	mux := http.NewServeMux()
@@ -57,6 +61,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
 	mux.HandleFunc("POST /v1/payments", func(w http.ResponseWriter, r *http.Request) {
 		var p payment.Payment
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
@@ -80,8 +85,9 @@ func main() {
 				return
 			}
 			writeJSON(w, http.StatusAccepted, map[string]any{
-				"txn_id": p.TxnID,
 				"status": "queued",
+				"txn_id": p.TxnID,
+				"poll":   "/v1/payments/" + p.TxnID,
 				"stream": cfg.Kinesis.StreamName,
 			})
 			return
@@ -93,6 +99,37 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, res)
+	})
+
+	mux.HandleFunc("GET /v1/payments/{txn_id}", func(w http.ResponseWriter, r *http.Request) {
+		txnID := r.PathValue("txn_id")
+		if txnID == "" {
+			http.Error(w, "txn_id required", http.StatusBadRequest)
+			return
+		}
+		rec, err := hist.GetByTxnID(r.Context(), txnID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if rec == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":  "pending",
+				"txn_id":  txnID,
+				"message": "Payment accepted; score not ready yet. Poll again shortly.",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":   "scored",
+			"txn_id":   rec.TxnID,
+			"card_id":  rec.CardID,
+			"amount":   rec.Amount,
+			"decision": rec.Decision,
+			"score":    rec.Score,
+			"merchant": rec.Merchant,
+			"currency": rec.Currency,
+		})
 	})
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux}

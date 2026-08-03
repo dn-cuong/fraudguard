@@ -23,6 +23,12 @@ resource "aws_dynamodb_table" "transactions" {
     name = "txn_id"
     type = "S"
   }
+
+  global_secondary_index {
+    name            = "txn_id-index"
+    hash_key        = "txn_id"
+    projection_type = "ALL"
+  }
 }
 
 resource "aws_elasticache_subnet_group" "redis" {
