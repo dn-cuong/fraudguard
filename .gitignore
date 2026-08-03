@@ -1,0 +1,43 @@
+# Binaries / build
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.out
+tmp/
+vendor/
+
+# Local secrets & env (never commit)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+secrets/
+
+# Terraform state & local overrides
+*.tfvars
+!*.tfvars.example
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Ansible inventory with real hosts / IPs
+ansible/inventory.yml
+ansible/inventory.ini
+ansible/host_vars/
+ansible/group_vars/all/vault.yml
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

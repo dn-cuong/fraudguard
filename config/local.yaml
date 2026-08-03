@@ -1,0 +1,24 @@
+redis_addr: "localhost:6379"
+
+dynamo:
+  region: "us-east-1"
+  table_name: "fraudguard-transactions"
+  endpoint: "http://localhost:8000"
+
+rules:
+  amount_high_usd: 2500
+  velocity_card_limit: 5
+  velocity_card_window: "1m"
+  velocity_ip_limit: 20
+  velocity_ip_window: "1m"
+  decline_score: 80
+  review_score: 40
+
+kinesis:
+  stream_name: "fraudguard-payments"
+  region: "us-east-1"
+  endpoint: "" # http://localhost:4566 for localstack
+
+http_addr: ":8080"
+worker_count: 32
+worker_name: "fraudguard-worker-local"

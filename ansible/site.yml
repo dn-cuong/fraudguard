@@ -1,0 +1,92 @@
+---
+- name: fraudguard workers
+  hosts: workers
+  become: true
+  vars:
+    app_user: fraudguard
+    app_dir: /opt/fraudguard
+    redis_addr: "{{ redis_endpoint }}:6379"
+    dynamo_table: fraudguard-transactions
+    kinesis_stream: fraudguard-payments
+    aws_region: us-east-1
+    worker_count: 32
+
+  tasks:
+    - name: app user
+      user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /sbin/nologin
+        create_home: false
+
+    - name: app dir
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: install worker binary
+      copy:
+        src: "{{ playbook_dir }}/../bin/worker"
+        dest: "{{ app_dir }}/worker"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    - name: worker config
+      copy:
+        dest: "{{ app_dir }}/config.yaml"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+        content: |
+          redis_addr: "{{ redis_addr }}"
+          dynamo:
+            region: "{{ aws_region }}"
+            table_name: "{{ dynamo_table }}"
+            endpoint: ""
+          rules:
+            amount_high_usd: 2500
+            velocity_card_limit: 5
+            velocity_card_window: "1m"
+            velocity_ip_limit: 20
+            velocity_ip_window: "1m"
+            decline_score: 80
+            review_score: 40
+          kinesis:
+            stream_name: "{{ kinesis_stream }}"
+            region: "{{ aws_region }}"
+            endpoint: ""
+          worker_count: {{ worker_count }}
+          worker_name: "{{ inventory_hostname }}"
+
+    - name: systemd unit
+      copy:
+        dest: /etc/systemd/system/fraudguard-worker.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=FraudGuard payment worker
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ app_user }}
+          WorkingDirectory={{ app_dir }}
+          ExecStart={{ app_dir }}/worker -config {{ app_dir }}/config.yaml -metrics-addr :9090
+          Restart=always
+          RestartSec=3
+          Environment=AWS_REGION={{ aws_region }}
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: enable worker
+      systemd:
+        name: fraudguard-worker
+        enabled: true
+        state: restarted
+        daemon_reload: true
