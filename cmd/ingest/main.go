@@ -132,6 +132,30 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("POST /v1/payments/{txn_id}/dispute", func(w http.ResponseWriter, r *http.Request) {
+		txnID := r.PathValue("txn_id")
+		if txnID == "" {
+			http.Error(w, "txn_id required", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			CardID string `json:"card_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CardID == "" {
+			http.Error(w, "card_id required", http.StatusBadRequest)
+			return
+		}
+		if err := hist.MarkDisputed(r.Context(), body.CardID, txnID); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "disputed",
+			"txn_id":  txnID,
+			"card_id": body.CardID,
+		})
+	})
+
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux}
 	go func() {
 		<-ctx.Done()

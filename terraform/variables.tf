@@ -23,3 +23,9 @@ variable "key_name" {
   description = "EC2 key pair for SSH / Ansible"
   default     = ""
 }
+
+variable "ssh_ingress_cidr" {
+  type        = string
+  description = "CIDR allowed to SSH to bastion/workers (avoid 0.0.0.0/0 in real use)"
+  default     = "0.0.0.0/0"
+}
