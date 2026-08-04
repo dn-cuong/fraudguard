@@ -47,7 +47,7 @@ func main() {
 	})
 	must(stream.EnsureStream(ctx, client, cfg.Kinesis.StreamName, 2))
 
-	worker := stream.NewWorker(client, cfg.Kinesis.StreamName, cfg.WorkerName, cfg.WorkerCount, svc)
+	worker := stream.NewWorker(client, cfg.Kinesis.StreamName, cfg.WorkerName, cfg.WorkerCount, cfg.WorkerReplicas, svc)
 	rep := heartbeat.New(cfg.WorkerName)
 	cw := cloudwatchx.New(ctx, cfg.Kinesis.Region, cfg.WorkerName)
 
@@ -64,7 +64,9 @@ func main() {
 	})
 	go func() {
 		slog.Info("metrics listening", "addr", *metricsAddr)
-		_ = http.ListenAndServe(*metricsAddr, mux)
+		if err := http.ListenAndServe(*metricsAddr, mux); err != nil && err != http.ErrServerClosed {
+			slog.Error("metrics serve", "err", err)
+		}
 	}()
 
 	go func() {
@@ -83,7 +85,12 @@ func main() {
 		}
 	}()
 
-	slog.Info("worker running", "stream", cfg.Kinesis.StreamName, "pool", cfg.WorkerCount)
+	slog.Info("worker running",
+		"stream", cfg.Kinesis.StreamName,
+		"pool", cfg.WorkerCount,
+		"replicas", cfg.WorkerReplicas,
+		"name", cfg.WorkerName,
+	)
 	must(worker.Run(ctx))
 }
 

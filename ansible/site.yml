@@ -61,6 +61,7 @@
             endpoint: ""
           worker_count: {{ worker_count }}
           worker_name: "{{ inventory_hostname }}"
+          worker_replicas: {{ groups['workers'] | length }}
 
     - name: systemd unit
       copy:

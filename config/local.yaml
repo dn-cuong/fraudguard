@@ -21,4 +21,5 @@ kinesis:
 
 http_addr: ":8080"
 worker_count: 32
-worker_name: "fraudguard-worker-local"
+worker_name: "fraudguard-worker-0"
+worker_replicas: 1

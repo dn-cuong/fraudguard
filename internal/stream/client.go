@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,23 +80,59 @@ type Worker struct {
 	streamName string
 	name       string
 	workers    int
+	replicas   int
 	scorer     *scorer.Service
 	scored     atomic.Int64
 	errors     atomic.Int64
 	latSumUs   atomic.Int64
 }
 
-func NewWorker(client *kinesis.Client, streamName, name string, workers int, s *scorer.Service) *Worker {
+func NewWorker(client *kinesis.Client, streamName, name string, workers, replicas int, s *scorer.Service) *Worker {
 	if workers < 1 {
 		workers = 8
+	}
+	if replicas < 1 {
+		replicas = 1
 	}
 	return &Worker{
 		client:     client,
 		streamName: streamName,
 		name:       name,
 		workers:    workers,
+		replicas:   replicas,
 		scorer:     s,
 	}
+}
+
+// assignShards gives each replica a disjoint subset of shards so multiple
+// EC2 workers do not double-consume the same records.
+func assignShards(shards []string, workerName string, replicas int) []string {
+	if replicas < 1 {
+		replicas = 1
+	}
+	sorted := append([]string(nil), shards...)
+	sort.Strings(sorted)
+	idx := workerIndex(workerName)
+	out := make([]string, 0, (len(sorted)/replicas)+1)
+	for i, id := range sorted {
+		if i%replicas == idx%replicas {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// workerIndex parses a trailing integer from names like "fraudguard-worker-1".
+func workerIndex(name string) int {
+	i := strings.LastIndex(name, "-")
+	if i < 0 || i+1 >= len(name) {
+		return 0
+	}
+	n, err := strconv.Atoi(name[i+1:])
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 func (w *Worker) Stats() (scored, errs int64, avgMs float64) {
@@ -105,11 +144,21 @@ func (w *Worker) Stats() (scored, errs int64, avgMs float64) {
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	shards, err := w.listShards(ctx)
+	allShards, err := w.listShards(ctx)
 	if err != nil {
 		return err
 	}
-	slog.Info("worker starting", "name", w.name, "shards", len(shards), "pool", w.workers)
+	shards := assignShards(allShards, w.name, w.replicas)
+	slog.Info("worker starting",
+		"name", w.name,
+		"shards_owned", len(shards),
+		"shards_total", len(allShards),
+		"replicas", w.replicas,
+		"pool", w.workers,
+	)
+	if len(shards) == 0 {
+		slog.Warn("no shards assigned to this worker; check worker_name index vs worker_replicas")
+	}
 
 	jobs := make(chan payment.Payment, w.workers*4)
 	var wg sync.WaitGroup
