@@ -122,20 +122,49 @@ func (s *Store) Put(ctx context.Context, rec payment.Record) error {
 }
 
 func (s *Store) HasDispute(ctx context.Context, cardID string) (bool, error) {
-	out, err := s.client.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(s.tableName),
-		KeyConditionExpression: aws.String("card_id = :c"),
-		FilterExpression:       aws.String("disputed = :d"),
+	// DynamoDB applies Limit before FilterExpression, so Limit:1 would miss a
+	// disputed row that is not the first item for the card. Page until we find
+	// a match or exhaust the partition.
+	var startKey map[string]types.AttributeValue
+	for {
+		out, err := s.client.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(s.tableName),
+			KeyConditionExpression: aws.String("card_id = :c"),
+			FilterExpression:       aws.String("disputed = :d"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":c": &types.AttributeValueMemberS{Value: cardID},
+				":d": &types.AttributeValueMemberBOOL{Value: true},
+			},
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return false, err
+		}
+		if len(out.Items) > 0 {
+			return true, nil
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			return false, nil
+		}
+		startKey = out.LastEvaluatedKey
+	}
+}
+
+// MarkDisputed sets disputed=true on an existing txn so HISTORY_DISPUTE can fire.
+func (s *Store) MarkDisputed(ctx context.Context, cardID, txnID string) error {
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.tableName),
+		Key: map[string]types.AttributeValue{
+			"card_id": &types.AttributeValueMemberS{Value: cardID},
+			"txn_id":  &types.AttributeValueMemberS{Value: txnID},
+		},
+		UpdateExpression:    aws.String("SET disputed = :d"),
+		ConditionExpression: aws.String("attribute_exists(txn_id)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":c": &types.AttributeValueMemberS{Value: cardID},
 			":d": &types.AttributeValueMemberBOOL{Value: true},
 		},
-		Limit: aws.Int32(1),
 	})
-	if err != nil {
-		return false, err
-	}
-	return len(out.Items) > 0, nil
+	return err
 }
 
 // GetByTxnID looks up a scored payment by txn_id (via GSI).

@@ -83,7 +83,7 @@ resource "aws_security_group" "worker" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # TODO: lock down
+    cidr_blocks = [var.ssh_ingress_cidr]
   }
 
   ingress {

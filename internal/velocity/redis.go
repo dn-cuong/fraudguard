@@ -24,6 +24,11 @@ func New(addr string) *Store {
 	}
 }
 
+// NewWithClient builds a Store around an existing Redis client (tests).
+func NewWithClient(rdb *redis.Client) *Store {
+	return &Store{rdb: rdb}
+}
+
 func (s *Store) Ping(ctx context.Context) error { return s.rdb.Ping(ctx).Err() }
 func (s *Store) Close() error                   { return s.rdb.Close() }
 
@@ -54,12 +59,21 @@ func (s *Store) IncrIP(ctx context.Context, ip string, window time.Duration) (in
 	return s.incr(ctx, ipKey(ip), window)
 }
 
+// incr bumps the counter and sets TTL only when the key is created.
+// Refreshing EXPIRE on every hit would keep busy keys alive forever and
+// break the "N txns per window" semantics advertised by the rules.
 func (s *Store) incr(ctx context.Context, key string, window time.Duration) (int64, error) {
-	pipe := s.rdb.TxPipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, window)
-	if _, err := pipe.Exec(ctx); err != nil {
+	n, err := s.rdb.Incr(ctx, key).Result()
+	if err != nil {
 		return 0, err
 	}
-	return incr.Val(), nil
+	if shouldExpire(n) {
+		if err := s.rdb.Expire(ctx, key, window).Err(); err != nil {
+			return n, err
+		}
+	}
+	return n, nil
 }
+
+// shouldExpire is true when INCR just created the key (count == 1).
+func shouldExpire(n int64) bool { return n == 1 }

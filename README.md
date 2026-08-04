@@ -64,6 +64,8 @@ That only means the event is on the stream. The decision comes from `GET /paymen
 
 Replicas stay consistent because scoring depends on shared stores, not process-local RAM.
 
+Workers partition Kinesis shards by `worker_name` index and `worker_replicas` so multiple EC2 instances do not double-score the same records. Keep Ansible `worker_replicas` equal to the number of hosts in the workers group (Terraform `worker_count`).
+
 ---
 
 ## Rules (v1)
@@ -74,6 +76,14 @@ Replicas stay consistent because scoring depends on shared stores, not process-l
 | `VELOCITY_CARD` | N txns / card / window | Redis |
 | `VELOCITY_IP` | N txns / IP / window | Redis |
 | `HISTORY_DISPUTE` | prior dispute on card | DynamoDB |
+
+Mark a scored txn as disputed (local ingest) so later payments on that card trip `HISTORY_DISPUTE`:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/payments/TXN_ID/dispute \
+  -H 'Content-Type: application/json' \
+  -d '{"card_id":"card-1"}'
+```
 
 Score stack: ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over `(payment, snapshot)` so any worker with the same snapshot scores the same way.
 
@@ -134,8 +144,9 @@ Loadgen (1k TPS):
 ```
 
 ```bash
-make test   # rule unit tests
+make test   # engine, velocity, shard-assignment unit tests
 make up     # redis + dynamodb-local
+make smoke  # POST payment then poll until scored
 make down
 ```
 
@@ -200,6 +211,7 @@ cd terraform && terraform destroy
 ## Safety
 
 - Do not commit `.env`, real `*.tfvars`, access-key CSVs, or PEM keys
+- Set `ssh_ingress_cidr` in `terraform.tfvars` to your IP/32 before apply (default is open for demos)
 - Destroy idle stacks
 - Tag resources `Project=fraudguard`
 
