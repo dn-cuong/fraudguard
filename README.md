@@ -55,6 +55,10 @@ This is a backend systems project (streaming, shared state, ops). It is not a fu
 
 That only means the event is on the stream. The decision comes from `GET /payments/{txn_id}` (DynamoDB GSI on `txn_id`). Local **score mode** can still return the decision inline for faster demos; polling works locally at `GET /v1/payments/{txn_id}` as well.
 
+> Note: the AWS/API Gateway deployment exposes `/payments` and `/payments/{txn_id}`, while the local ingest binary exposes the same flow under `/v1/payments` and `/v1/payments/{txn_id}` for convenience. The architecture diagram reflects the AWS path, and the local endpoints are a thin wrapper around the same pipeline.
+
+> Note: the AWS/API Gateway deployment exposes `/payments` and `/payments/{txn_id}`, while the local ingest binary exposes the same flow under `/v1/payments` and `/v1/payments/{txn_id}` for convenience. The architecture diagram reflects the AWS path, and the local endpoints are a thin wrapper around the same pipeline.
+
 ### Why Redis + DynamoDB
 
 | Store | Role |
