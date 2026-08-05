@@ -1,6 +1,6 @@
 # FraudGuard
 
-![FraudGuard system architecture](images/architecture.png)
+![FraudGuard system architecture](images/fraudguard_architecture.png)
 
 Distributed real-time fraud scoring pipeline on AWS. Payments enter through API Gateway into Kinesis; Go workers on EC2 apply shared rule checks using ElastiCache (Redis) velocity counters and DynamoDB transaction history, then expose the decision over `GET /payments/{txn_id}`.
 
