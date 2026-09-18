@@ -1,6 +1,6 @@
 module github.com/mit/fraudguard
 
-go 1.22
+go 1.25.13
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.32.6
