@@ -2,6 +2,7 @@ package velocity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -37,7 +38,7 @@ func ipKey(ip string) string       { return fmt.Sprintf("vel:ip:%s", ip) }
 
 func (s *Store) GetCard(ctx context.Context, cardID string) (int64, error) {
 	n, err := s.rdb.Get(ctx, cardKey(cardID)).Int64()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return 0, nil
 	}
 	return n, err
@@ -45,7 +46,7 @@ func (s *Store) GetCard(ctx context.Context, cardID string) (int64, error) {
 
 func (s *Store) GetIP(ctx context.Context, ip string) (int64, error) {
 	n, err := s.rdb.Get(ctx, ipKey(ip)).Int64()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return 0, nil
 	}
 	return n, err

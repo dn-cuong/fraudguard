@@ -111,7 +111,7 @@ Score stack: ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over 
 
 ## Local
 
-Needs Go 1.22+ and Docker Desktop.
+Needs Go 1.25+ and Docker Desktop.
 
 ```bash
 docker compose up -d redis dynamodb
