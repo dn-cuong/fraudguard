@@ -145,7 +145,13 @@ make down
 
 ### Benchmarks
 
-TODO: numbers from `make loadgen`. The old "sub-80ms / 1,000+ TPS" line was a target, not something I measured, so I removed it.
+Local only: `-mode score` (inline scoring), redis and dynamodb-local in Docker on a Mac (Apple M3 Pro). `./bin/loadgen -tps 1000 -duration 15s -workers 64`:
+
+| target TPS | achieved | errors | p50 | p99 |
+|-----------|----------|--------|-----|-----|
+| 1000 | 996 | 0 | 1.3 ms | 81 ms |
+
+That's one run, and it doesn't include Kinesis or API Gateway, so it says nothing about the AWS latency.
 
 ---
 
