@@ -75,6 +75,13 @@ func main() {
 			http.Error(w, "card_id and amount required", http.StatusBadRequest)
 			return
 		}
+		if p.Currency == "" {
+			p.Currency = "USD"
+		}
+		if p.Currency != "USD" {
+			http.Error(w, scorer.ErrUnsupportedCurrency.Error(), http.StatusBadRequest)
+			return
+		}
 		if p.Timestamp.IsZero() {
 			p.Timestamp = time.Now().UTC()
 		}

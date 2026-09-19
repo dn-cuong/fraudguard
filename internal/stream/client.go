@@ -17,7 +17,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
-	"github.com/google/uuid"
 	"github.com/mit/fraudguard/internal/payment"
 	"github.com/mit/fraudguard/internal/scorer"
 )
@@ -246,7 +245,11 @@ func (w *Worker) pollShard(ctx context.Context, shardID string, jobs chan<- paym
 				continue
 			}
 			if p.TxnID == "" {
-				p.TxnID = uuid.NewString()
+				// The ingest layers always assign one. A generated id here
+				// would be unpollable and break dedupe on redelivery.
+				w.errors.Add(1)
+				slog.Error("record without txn_id, dropped", "shard", shardID)
+				continue
 			}
 			if p.Timestamp.IsZero() {
 				p.Timestamp = time.Now().UTC()
