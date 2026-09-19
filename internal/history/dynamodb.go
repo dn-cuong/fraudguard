@@ -23,6 +23,8 @@ type Config struct {
 	SecretAccessKey string
 }
 
+const disputeIndex = "dispute-index"
+
 // Store persists scored transactions in DynamoDB.
 type Store struct {
 	client    *dynamodb.Client
@@ -85,6 +87,7 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("card_id"), AttributeType: types.ScalarAttributeTypeS},
 			{AttributeName: aws.String("txn_id"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("dispute_card_id"), AttributeType: types.ScalarAttributeTypeS},
 		},
 		KeySchema: []types.KeySchemaElement{
 			{AttributeName: aws.String("card_id"), KeyType: types.KeyTypeHash},
@@ -96,6 +99,14 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 				{AttributeName: aws.String("txn_id"), KeyType: types.KeyTypeHash},
 			},
 			Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+		}, {
+			// Sparse: only disputed txns carry dispute_card_id, so this index
+			// holds nothing but disputes and a lookup never scans history.
+			IndexName: aws.String(disputeIndex),
+			KeySchema: []types.KeySchemaElement{
+				{AttributeName: aws.String("dispute_card_id"), KeyType: types.KeyTypeHash},
+			},
+			Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
 		}},
 		BillingMode: types.BillingModePayPerRequest,
 	})
@@ -121,33 +132,23 @@ func (s *Store) Put(ctx context.Context, rec payment.Record) error {
 	return err
 }
 
+// HasDispute reports whether any txn on the card was marked disputed. It reads
+// the sparse dispute-index, so the cost doesn't grow with the card's history.
+// GSIs are eventually consistent: a dispute shows up a moment after it's marked.
 func (s *Store) HasDispute(ctx context.Context, cardID string) (bool, error) {
-	// DynamoDB applies Limit before FilterExpression, so Limit:1 would miss a
-	// disputed row that is not the first item for the card. Page until we find
-	// a match or exhaust the partition.
-	var startKey map[string]types.AttributeValue
-	for {
-		out, err := s.client.Query(ctx, &dynamodb.QueryInput{
-			TableName:              aws.String(s.tableName),
-			KeyConditionExpression: aws.String("card_id = :c"),
-			FilterExpression:       aws.String("disputed = :d"),
-			ExpressionAttributeValues: map[string]types.AttributeValue{
-				":c": &types.AttributeValueMemberS{Value: cardID},
-				":d": &types.AttributeValueMemberBOOL{Value: true},
-			},
-			ExclusiveStartKey: startKey,
-		})
-		if err != nil {
-			return false, err
-		}
-		if len(out.Items) > 0 {
-			return true, nil
-		}
-		if len(out.LastEvaluatedKey) == 0 {
-			return false, nil
-		}
-		startKey = out.LastEvaluatedKey
+	out, err := s.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(s.tableName),
+		IndexName:              aws.String(disputeIndex),
+		KeyConditionExpression: aws.String("dispute_card_id = :c"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":c": &types.AttributeValueMemberS{Value: cardID},
+		},
+		Limit: aws.Int32(1),
+	})
+	if err != nil {
+		return false, err
 	}
+	return len(out.Items) > 0, nil
 }
 
 // MarkDisputed sets disputed=true on an existing txn so HISTORY_DISPUTE can fire.
@@ -158,10 +159,11 @@ func (s *Store) MarkDisputed(ctx context.Context, cardID, txnID string) error {
 			"card_id": &types.AttributeValueMemberS{Value: cardID},
 			"txn_id":  &types.AttributeValueMemberS{Value: txnID},
 		},
-		UpdateExpression:    aws.String("SET disputed = :d"),
+		UpdateExpression:    aws.String("SET disputed = :d, dispute_card_id = :c"),
 		ConditionExpression: aws.String("attribute_exists(txn_id)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":d": &types.AttributeValueMemberBOOL{Value: true},
+			":c": &types.AttributeValueMemberS{Value: cardID},
 		},
 	})
 	return err
