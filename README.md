@@ -31,6 +31,7 @@ Kinesis partition key is `card_id`, so one card always lands on the same shard a
 5. **Rule engine** produces ALLOW / REVIEW / DECLINE and writes the txn record.
 6. **Client polls** `GET /payments/{txn_id}`
    - `pending` while scoring
+   - `failed` if it couldn't be scored (with the reason)
    - `scored` with `decision` + `score`
 7. **CloudWatch** `WorkerHeartbeat` metrics; missing heartbeats trip failover alarms.
 
@@ -55,7 +56,12 @@ That only means the event is on the stream. The decision comes from `GET /paymen
 
 Replicas stay consistent because scoring depends on shared stores, not process-local RAM.
 
-Workers partition Kinesis shards by `worker_name` index and `worker_replicas` so multiple EC2 instances do not double-score the same records. Keep Ansible `worker_replicas` equal to the number of hosts in the workers group (Terraform `worker_count`).
+Shards are shared between workers through leases in a small DynamoDB table (`internal/lease`). A worker takes its fair share of shards, renews the lease every few seconds, and if it dies the lease expires (30s) and another worker picks the shard up from the last checkpoint. There's no worker count to keep in sync anywhere, so you can add or remove hosts freely.
+
+- A batch is checkpointed only after every record in it has a result. A crash replays the batch; scoring is idempotent (Redis counts by `txn_id`, DynamoDB `Put` ignores a txn that's already stored), so replays are safe.
+- Workers start from the oldest record when a shard has no checkpoint, so payments that arrived before any worker was up still get scored.
+- After a reshard, a child shard starts only once its parent is fully read, so a card's events stay in order.
+- A failing score is retried 3 times. If it still fails, an `ERROR` record is stored and the client sees `failed`. If even that can't be stored, the batch isn't checkpointed and gets read again.
 
 ---
 
@@ -137,7 +143,9 @@ Loadgen (1k TPS):
 ```
 
 ```bash
-make test   # engine, scorer, velocity, shard-assignment, config
+make test   # engine, scorer, velocity, consumer, config
+# lease and history tests need DynamoDB Local, otherwise they skip:
+DYNAMO_TEST_ENDPOINT=http://localhost:8000 go test ./...
 make up     # redis + dynamodb-local
 make smoke  # POST payment then poll until scored
 make down
@@ -149,6 +157,21 @@ Local only: `-mode score` (inline scoring), redis and dynamodb-local in Docker o
 
 | target TPS | achieved | errors | p50 | p99 |
 |-----------|----------|--------|-----|-----|
+| 1000 | 999 | 0 | 1.3 ms | 31 ms |
+
+One run, and it doesn't include Kinesis or API Gateway, so it says nothing about AWS latency.
+
+### Failover, checked locally
+
+Against LocalStack Kinesis + DynamoDB Local, with `bin/ingest -mode kinesis` and two `bin/worker` processes:
+
+- 20 payments sent while no worker was running were all scored once a worker started.
+- `kill -9` on one worker: its shard sat `pending` until the lease expired, then the other worker resumed from the checkpoint and all payments were scored.
+- Resharding 2 → 4 with traffic running: parents were read to the end first, then the 4 children; all payments scored.
+- Redis stopped: payments came back `failed` with the error, and scoring worked again once Redis was back.
+- SIGTERM: the worker hands its shards back, so the next worker takes them right away instead of waiting for the lease.
+
+-----------|----------|--------|-----|-----|
 | 1000 | 996 | 0 | 1.3 ms | 81 ms |
 
 That's one run, and it doesn't include Kinesis or API Gateway, so it says nothing about the AWS latency.
@@ -157,11 +180,11 @@ That's one run, and it doesn't include Kinesis or API Gateway, so it says nothin
 
 ## Known limitations
 
-- If the DynamoDB write fails there's no retry, so the txn is counted in Redis but has no record.
-- No checkpointing. Workers start at `LATEST` (`internal/stream/client.go`), so anything that arrives while they're all down is skipped.
-- A failed score is only logged. No retry, no DLQ, and the client just sees `pending` forever.
-- Shard split is static (worker index + `worker_replicas`). Change the host count without updating Ansible and records get scored twice or not at all. Resharding isn't handled.
-- Velocity is a fixed window from the first hit, so a burst split across two windows can stay under the limit.
+- Not tested on real AWS yet, only Terraform validate plus the LocalStack run above.
+- Lease expiry uses each worker's own clock, so hosts need roughly synced time (chrony on the AL2023 AMI does this). The 30s lease is far above normal skew.
+- Deliveries are at-least-once. A txn that's replayed after its Redis entry has left the window gets counted again, which only matters if a worker is down for longer than the window.
+- The sliding window keeps one Redis entry per txn in the window, so a card or IP sending thousands of txns a minute costs memory until they age out.
+- If the DynamoDB write of a scored txn fails, the txn is retried and finally stored as `ERROR`, but its Redis counts stay.
 - USD only. Anything else is rejected, there's no FX.
 - Dispute lookup goes through a GSI, so a dispute shows up a moment after it's marked. Txns disputed before the `dispute-index` existed aren't in it.
 - SSH ingress is open by default, see Safety.
@@ -170,7 +193,7 @@ That's one run, and it doesn't include Kinesis or API Gateway, so it says nothin
 
 ## AWS
 
-Provisions API Gateway, Kinesis, ElastiCache, DynamoDB (+ `txn_id-index` GSI), EC2 workers, bastion, CloudWatch.
+Provisions API Gateway, Kinesis, ElastiCache, DynamoDB (transactions with `txn_id-index` and `dispute-index`, plus the lease table), EC2 workers, bastion, CloudWatch.
 
 **Cost:** NAT + ElastiCache dominate. Apply → smoke → `terraform destroy` in one sitting for demos.
 
