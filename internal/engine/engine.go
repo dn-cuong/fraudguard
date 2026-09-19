@@ -29,11 +29,12 @@ func DefaultConfig() Config {
 	}
 }
 
-// Snapshot is the Redis + DynamoDB view at score time.
+// Snapshot is the Redis + DynamoDB view at score time. CardCount and IPCount
+// are the txn counts in the current window, including the txn being scored.
 type Snapshot struct {
-	CardVelocity int64
-	IPVelocity   int64
-	HadDispute   bool
+	CardCount  int64
+	IPCount    int64
+	HadDispute bool
 }
 
 type Engine struct {
@@ -57,21 +58,19 @@ func (e *Engine) Evaluate(p payment.Payment, snap Snapshot) payment.ScoreResult 
 		})
 	}
 
-	cardCount := snap.CardVelocity + 1
-	if cardCount > e.cfg.VelocityCardLimit {
+	if snap.CardCount > e.cfg.VelocityCardLimit {
 		score += 50
 		triggered = append(triggered, payment.TriggeredRule{
 			ID:      "VELOCITY_CARD",
-			Message: fmt.Sprintf("card %s has %d txns in window (limit %d)", p.CardID, cardCount, e.cfg.VelocityCardLimit),
+			Message: fmt.Sprintf("card %s has %d txns in window (limit %d)", p.CardID, snap.CardCount, e.cfg.VelocityCardLimit),
 		})
 	}
 
-	ipCount := snap.IPVelocity + 1
-	if ipCount > e.cfg.VelocityIPLimit {
+	if snap.IPCount > e.cfg.VelocityIPLimit {
 		score += 30
 		triggered = append(triggered, payment.TriggeredRule{
 			ID:      "VELOCITY_IP",
-			Message: fmt.Sprintf("ip %s has %d txns in window (limit %d)", p.IP, ipCount, e.cfg.VelocityIPLimit),
+			Message: fmt.Sprintf("ip %s has %d txns in window (limit %d)", p.IP, snap.IPCount, e.cfg.VelocityIPLimit),
 		})
 	}
 

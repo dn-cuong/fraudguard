@@ -11,20 +11,18 @@ import (
 )
 
 type fakeVel struct {
-	card, ip       int64
-	incrCard, incr int
-	getErr         error
+	card, ip int64 // counts to report, including the txn being scored
+	hits     int
+	err      error
 }
 
-func (f *fakeVel) GetCard(context.Context, string) (int64, error) { return f.card, f.getErr }
-func (f *fakeVel) GetIP(context.Context, string) (int64, error)   { return f.ip, nil }
-func (f *fakeVel) IncrCard(context.Context, string, time.Duration) (int64, error) {
-	f.incrCard++
-	return f.card + 1, nil
+func (f *fakeVel) HitCard(context.Context, string, string, time.Duration) (int64, error) {
+	f.hits++
+	return f.card, f.err
 }
-func (f *fakeVel) IncrIP(context.Context, string, time.Duration) (int64, error) {
-	f.incr++
-	return f.ip + 1, nil
+func (f *fakeVel) HitIP(context.Context, string, string, time.Duration) (int64, error) {
+	f.hits++
+	return f.ip, f.err
 }
 
 type fakeHist struct {
@@ -47,8 +45,8 @@ func newSvc(v *fakeVel, h *fakeHist) *Service {
 	return New(engine.New(cfg), v, h, cfg)
 }
 
-func TestScoreWritesRecordAndBumpsCounters(t *testing.T) {
-	v, h := &fakeVel{}, &fakeHist{}
+func TestScoreWritesRecord(t *testing.T) {
+	v, h := &fakeVel{card: 1, ip: 1}, &fakeHist{}
 	res, err := newSvc(v, h).Score(context.Background(), payment.Payment{TxnID: "t1", CardID: "c1", Amount: 10, IP: "1.1.1.1"})
 	if err != nil {
 		t.Fatal(err)
@@ -56,16 +54,14 @@ func TestScoreWritesRecordAndBumpsCounters(t *testing.T) {
 	if res.Decision != payment.DecisionAllow {
 		t.Fatalf("want ALLOW, got %s", res.Decision)
 	}
-	if v.incrCard != 1 || v.incr != 1 {
-		t.Fatalf("counters: card=%d ip=%d", v.incrCard, v.incr)
-	}
 	if len(h.puts) != 1 || h.puts[0].Currency != "USD" || h.puts[0].Timestamp.IsZero() {
 		t.Fatalf("unexpected record: %+v", h.puts)
 	}
 }
 
-func TestScoreUsesSharedSnapshot(t *testing.T) {
-	v, h := &fakeVel{card: 5}, &fakeHist{dispute: true}
+func TestScoreUsesReturnedCounts(t *testing.T) {
+	// 6th txn on the card (limit 5) plus a prior dispute
+	v, h := &fakeVel{card: 6, ip: 1}, &fakeHist{dispute: true}
 	res, err := newSvc(v, h).Score(context.Background(), payment.Payment{TxnID: "t2", CardID: "c1", Amount: 10, IP: "1.1.1.1"})
 	if err != nil {
 		t.Fatal(err)
@@ -75,23 +71,32 @@ func TestScoreUsesSharedSnapshot(t *testing.T) {
 	}
 }
 
-func TestScoreReadErrorWritesNothing(t *testing.T) {
-	v, h := &fakeVel{getErr: errors.New("boom")}, &fakeHist{}
+func TestScoreVelocityErrorWritesNothing(t *testing.T) {
+	v, h := &fakeVel{err: errors.New("boom")}, &fakeHist{}
 	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{CardID: "c"}); err == nil {
 		t.Fatal("want error")
 	}
-	if v.incrCard != 0 || len(h.puts) != 0 {
-		t.Fatal("no writes expected when reads fail")
+	if len(h.puts) != 0 {
+		t.Fatal("no record expected when velocity fails")
 	}
 }
 
-// counters go up before the Put, so a failed Put still leaves them bumped
-func TestScorePutFailureLeavesCountersBumped(t *testing.T) {
-	v, h := &fakeVel{}, &fakeHist{putErr: errors.New("throttled")}
+func TestScoreRejectsNonUSD(t *testing.T) {
+	v, h := &fakeVel{}, &fakeHist{}
+	_, err := newSvc(v, h).Score(context.Background(), payment.Payment{CardID: "c", Currency: "JPY", Amount: 3000})
+	if !errors.Is(err, ErrUnsupportedCurrency) {
+		t.Fatalf("want ErrUnsupportedCurrency, got %v", err)
+	}
+	if v.hits != 0 {
+		t.Fatal("rejected payment must not touch counters")
+	}
+}
+
+// A failed Put no longer double counts: a retry of the same txn_id hits the
+// per-txn marker in Redis and gets the same count back.
+func TestScorePutFailureReturnsError(t *testing.T) {
+	v, h := &fakeVel{card: 1, ip: 1}, &fakeHist{putErr: errors.New("throttled")}
 	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{CardID: "c", IP: "i"}); err == nil {
 		t.Fatal("want error")
-	}
-	if v.incrCard != 1 {
-		t.Fatalf("want card counter bumped once, got %d", v.incrCard)
 	}
 }

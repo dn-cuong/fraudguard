@@ -29,7 +29,7 @@ func TestEvaluateAmountAndVelocityDecline(t *testing.T) {
 	e := New(cfg)
 
 	p := payment.Payment{TxnID: "t2", CardID: "card-2", Amount: 500, IP: "2.2.2.2"}
-	res := e.Evaluate(p, Snapshot{CardVelocity: 2})
+	res := e.Evaluate(p, Snapshot{CardCount: 3})
 	if res.Decision != payment.DecisionDecline {
 		t.Fatalf("want DECLINE, got %s score=%d", res.Decision, res.Score)
 	}
@@ -59,7 +59,7 @@ func TestEvaluateDeterministic(t *testing.T) {
 		TxnID: "t4", CardID: "card-4", Amount: 3000, IP: "4.4.4.4",
 		Timestamp: time.Now().UTC(),
 	}
-	snap := Snapshot{CardVelocity: 6, IPVelocity: 25, HadDispute: true}
+	snap := Snapshot{CardCount: 7, IPCount: 26, HadDispute: true}
 	a := e.Evaluate(p, snap)
 	b := e.Evaluate(p, snap)
 	if a.Decision != b.Decision || a.Score != b.Score || len(a.TriggeredRules) != len(b.TriggeredRules) {
@@ -102,7 +102,7 @@ func TestEvaluateIPVelocity(t *testing.T) {
 	e := New(cfg)
 	res := e.Evaluate(
 		payment.Payment{TxnID: "t7", CardID: "c", Amount: 10, IP: "9.9.9.9"},
-		Snapshot{IPVelocity: 2},
+		Snapshot{IPCount: 3},
 	)
 	found := false
 	for _, r := range res.TriggeredRules {
@@ -139,10 +139,10 @@ func TestEvaluateBoundaries(t *testing.T) {
 	}{
 		{"amount just under", 2499.99, Snapshot{}, "AMOUNT_HIGH", false},
 		{"amount at threshold", 2500, Snapshot{}, "AMOUNT_HIGH", true},
-		{"card: this txn is the 5th", 10, Snapshot{CardVelocity: 4}, "VELOCITY_CARD", false},
-		{"card: this txn is the 6th", 10, Snapshot{CardVelocity: 5}, "VELOCITY_CARD", true},
-		{"ip: this txn is the 20th", 10, Snapshot{IPVelocity: 19}, "VELOCITY_IP", false},
-		{"ip: this txn is the 21st", 10, Snapshot{IPVelocity: 20}, "VELOCITY_IP", true},
+		{"card: this txn is the 5th", 10, Snapshot{CardCount: 5}, "VELOCITY_CARD", false},
+		{"card: this txn is the 6th", 10, Snapshot{CardCount: 6}, "VELOCITY_CARD", true},
+		{"ip: this txn is the 20th", 10, Snapshot{IPCount: 20}, "VELOCITY_IP", false},
+		{"ip: this txn is the 21st", 10, Snapshot{IPCount: 21}, "VELOCITY_IP", true},
 	}
 	for _, tc := range cases {
 		res := e.Evaluate(payment.Payment{CardID: "c", IP: "i", Amount: tc.amount}, tc.snap)
@@ -156,7 +156,7 @@ func TestEvaluateScoreCutoffs(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DeclineScore, cfg.ReviewScore = 50, 40 // card velocity alone = 50
 	e := New(cfg)
-	res := e.Evaluate(payment.Payment{CardID: "c"}, Snapshot{CardVelocity: 5})
+	res := e.Evaluate(payment.Payment{CardID: "c"}, Snapshot{CardCount: 6})
 	if res.Decision != payment.DecisionDecline || res.Score != 50 {
 		t.Fatalf("score == DeclineScore must decline, got %s/%d", res.Decision, res.Score)
 	}
