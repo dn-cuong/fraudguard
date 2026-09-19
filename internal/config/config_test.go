@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestLoadWorkerReplicasDefault(t *testing.T) {
+func TestLoadDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
 	body := []byte(`
@@ -36,8 +36,8 @@ worker_name: "fraudguard-worker-0"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.WorkerReplicas != 1 {
-		t.Fatalf("want default worker_replicas=1, got %d", cfg.WorkerReplicas)
+	if cfg.LeaseTable != "fraudguard-leases" {
+		t.Fatalf("want default lease table, got %q", cfg.LeaseTable)
 	}
 	eng, err := cfg.EngineConfig()
 	if err != nil {

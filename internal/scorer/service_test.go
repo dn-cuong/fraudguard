@@ -100,3 +100,14 @@ func TestScorePutFailureReturnsError(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+func TestRecordFailureStoresErrorDecision(t *testing.T) {
+	h := &fakeHist{}
+	err := newSvc(&fakeVel{}, h).RecordFailure(context.Background(), payment.Payment{TxnID: "t9", CardID: "c"}, errors.New("redis down"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.puts) != 1 || h.puts[0].Decision != payment.DecisionError || h.puts[0].Error != "redis down" {
+		t.Fatalf("unexpected record: %+v", h.puts)
+	}
+}

@@ -43,6 +43,18 @@ resource "aws_dynamodb_table" "transactions" {
   }
 }
 
+# shard leases and checkpoints for the workers (internal/lease)
+resource "aws_dynamodb_table" "leases" {
+  name         = "${var.project}-leases"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "shard_id"
+
+  attribute {
+    name = "shard_id"
+    type = "S"
+  }
+}
+
 resource "aws_elasticache_subnet_group" "redis" {
   name       = "${var.project}-redis"
   subnet_ids = aws_subnet.private[*].id

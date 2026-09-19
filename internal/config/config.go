@@ -11,14 +11,14 @@ import (
 )
 
 type Config struct {
-	RedisAddr      string      `yaml:"redis_addr"`
-	Dynamo         DynamoYAML  `yaml:"dynamo"`
-	Rules          RulesYAML   `yaml:"rules"`
-	Kinesis        KinesisYAML `yaml:"kinesis"`
-	HTTPAddr       string      `yaml:"http_addr"`
-	WorkerCount    int         `yaml:"worker_count"`
-	WorkerName     string      `yaml:"worker_name"`
-	WorkerReplicas int         `yaml:"worker_replicas"`
+	RedisAddr   string      `yaml:"redis_addr"`
+	Dynamo      DynamoYAML  `yaml:"dynamo"`
+	Rules       RulesYAML   `yaml:"rules"`
+	Kinesis     KinesisYAML `yaml:"kinesis"`
+	HTTPAddr    string      `yaml:"http_addr"`
+	WorkerCount int         `yaml:"worker_count"`
+	WorkerName  string      `yaml:"worker_name"`
+	LeaseTable  string      `yaml:"lease_table"`
 }
 
 type DynamoYAML struct {
@@ -59,9 +59,6 @@ func Load(path string) (Config, error) {
 	if cfg.WorkerName == "" {
 		cfg.WorkerName = envOr("WORKER_NAME", "fraudguard-worker-0")
 	}
-	if cfg.WorkerReplicas < 1 {
-		cfg.WorkerReplicas = 1
-	}
 	return cfg, nil
 }
 
@@ -87,10 +84,10 @@ func Default() Config {
 			Region:     envOr("AWS_REGION", "us-east-1"),
 			Endpoint:   os.Getenv("KINESIS_ENDPOINT"),
 		},
-		HTTPAddr:       envOr("HTTP_ADDR", ":8080"),
-		WorkerCount:    32,
-		WorkerName:     envOr("WORKER_NAME", "fraudguard-worker-0"),
-		WorkerReplicas: 1,
+		HTTPAddr:    envOr("HTTP_ADDR", ":8080"),
+		WorkerCount: 32,
+		WorkerName:  envOr("WORKER_NAME", "fraudguard-worker-0"),
+		LeaseTable:  envOr("LEASE_TABLE", "fraudguard-leases"),
 	}
 }
 

@@ -7,6 +7,7 @@
     app_dir: /opt/fraudguard
     redis_addr: "{{ redis_endpoint }}:6379"
     dynamo_table: fraudguard-transactions
+    lease_table: fraudguard-leases
     kinesis_stream: fraudguard-payments
     aws_region: us-east-1
     worker_count: 32
@@ -61,7 +62,7 @@
             endpoint: ""
           worker_count: {{ worker_count }}
           worker_name: "{{ inventory_hostname }}"
-          worker_replicas: {{ groups['workers'] | length }}
+          lease_table: "{{ lease_table }}"
 
     - name: systemd unit
       copy:

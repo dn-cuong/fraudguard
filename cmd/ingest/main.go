@@ -127,6 +127,15 @@ func main() {
 			})
 			return
 		}
+		if rec.Decision == payment.DecisionError {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":  "failed",
+				"txn_id":  rec.TxnID,
+				"card_id": rec.CardID,
+				"error":   rec.Error,
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":   "scored",
 			"txn_id":   rec.TxnID,
