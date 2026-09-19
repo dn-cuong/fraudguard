@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -32,6 +33,11 @@ type Store struct {
 }
 
 func New(cfg Config) *Store {
+	return &Store{client: NewClient(cfg), tableName: cfg.TableName}
+}
+
+// NewClient builds the DynamoDB client. The lease store shares it.
+func NewClient(cfg Config) *dynamodb.Client {
 	opts := []func(*dynamodb.Options){}
 	var awsCfg aws.Config
 
@@ -58,11 +64,7 @@ func New(cfg Config) *Store {
 			awsCfg = loaded
 		}
 	}
-
-	return &Store{
-		client:    dynamodb.NewFromConfig(awsCfg, opts...),
-		tableName: cfg.TableName,
-	}
+	return dynamodb.NewFromConfig(awsCfg, opts...)
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -120,15 +122,23 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 	}, 30*time.Second)
 }
 
+// Put stores a txn once. If the txn_id is already there (a redelivered record,
+// or one that was disputed after scoring) it does nothing, so a replay can't
+// overwrite the first result or wipe the disputed flag.
 func (s *Store) Put(ctx context.Context, rec payment.Record) error {
 	item, err := attributevalue.MarshalMap(rec)
 	if err != nil {
 		return err
 	}
 	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(s.tableName),
-		Item:      item,
+		TableName:           aws.String(s.tableName),
+		Item:                item,
+		ConditionExpression: aws.String("attribute_not_exists(txn_id)"),
 	})
+	var exists *types.ConditionalCheckFailedException
+	if errors.As(err, &exists) {
+		return nil
+	}
 	return err
 }
 
