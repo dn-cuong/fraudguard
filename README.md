@@ -4,28 +4,17 @@
 
 Distributed real-time fraud scoring pipeline on AWS. Payments enter through API Gateway into Kinesis; Go workers on EC2 apply shared rule checks using ElastiCache (Redis) velocity counters and DynamoDB transaction history, then expose the decision over `GET /payments/{txn_id}`.
 
-| Decision | Meaning |
-|----------|---------|
-| `ALLOW` | Pass |
-| `REVIEW` | Flag for manual review |
-| `DECLINE` | Block |
+Decisions are `ALLOW`, `REVIEW` or `DECLINE`. Terraform for infra, Ansible to deploy the workers, CloudWatch alarms on worker heartbeats.
 
-**Targets:** sub-80ms median scoring latency under load, 1,000+ TPS in local loadgen, consistent decisions across workers via shared Redis/DynamoDB state. Infra is Terraform; workers deploy with Ansible; CloudWatch alarms watch worker heartbeats.
+Side project to see what happens when a few scorer replicas share state. Just rules, no ML.
 
 ---
 
-## Problem
+## Why stateless
 
-Authorization paths need a fast risk decision. A single scorer does not survive burst traffic, and if each replica keeps velocity state in local memory, replicas diverge under concurrency.
+A single scorer can't take bursts, and if each replica counts velocity in its own memory they stop agreeing with each other. So the workers keep nothing locally. Counters are in Redis, history in DynamoDB, and the rules only look at `(payment, snapshot)`.
 
-FraudGuard keeps workers **stateless**:
-
-1. Ingest via public API Gateway (`POST /payments`)
-2. Fan-out on Kinesis (partition key = `card_id`)
-3. Score with shared Redis + DynamoDB + pure rules
-4. Persist the decision; clients poll `GET /payments/{txn_id}`
-
-This is a backend systems project (streaming, shared state, ops). It is not a full bank product and not an ML model.
+Kinesis partition key is `card_id`, so one card always lands on the same shard and stays in order. Downside: a very busy card sits on one shard. Haven't tried it.
 
 ---
 
@@ -54,8 +43,6 @@ This is a backend systems project (streaming, shared state, ops). It is not a fu
 ```
 
 That only means the event is on the stream. The decision comes from `GET /payments/{txn_id}` (DynamoDB GSI on `txn_id`). Local **score mode** can still return the decision inline for faster demos; polling works locally at `GET /v1/payments/{txn_id}` as well.
-
-> Note: the AWS/API Gateway deployment exposes `/payments` and `/payments/{txn_id}`, while the local ingest binary exposes the same flow under `/v1/payments` and `/v1/payments/{txn_id}` for convenience. The architecture diagram reflects the AWS path, and the local endpoints are a thin wrapper around the same pipeline.
 
 > Note: the AWS/API Gateway deployment exposes `/payments` and `/payments/{txn_id}`, while the local ingest binary exposes the same flow under `/v1/payments` and `/v1/payments/{txn_id}` for convenience. The architecture diagram reflects the AWS path, and the local endpoints are a thin wrapper around the same pipeline.
 
@@ -148,11 +135,26 @@ Loadgen (1k TPS):
 ```
 
 ```bash
-make test   # engine, velocity, shard-assignment unit tests
+make test   # engine, scorer, velocity, shard-assignment, config
 make up     # redis + dynamodb-local
 make smoke  # POST payment then poll until scored
 make down
 ```
+
+### Benchmarks
+
+TODO: numbers from `make loadgen`. The old "sub-80ms / 1,000+ TPS" line was a target, not something I measured, so I removed it.
+
+---
+
+## Known limitations
+
+- Not idempotent. Redis counters go up before the DynamoDB write (`internal/scorer/service.go`), so if the write fails or Kinesis redelivers, the payment gets counted twice.
+- No checkpointing. Workers start at `LATEST` (`internal/stream/client.go`), so anything that arrives while they're all down is skipped.
+- A failed score is only logged. No retry, no DLQ, and the client just sees `pending` forever.
+- Shard split is static (worker index + `worker_replicas`). Change the host count without updating Ansible and records get scored twice or not at all. Resharding isn't handled.
+- Velocity is a fixed window from the first hit, so a burst split across two windows can stay under the limit.
+- SSH ingress is open by default, see Safety.
 
 ---
 
