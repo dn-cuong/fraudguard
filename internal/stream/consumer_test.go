@@ -33,10 +33,10 @@ func (f *fakeScorer) RecordFailure(_ context.Context, _ payment.Payment, cause e
 	return f.failureErr
 }
 
-var boom = errors.New("redis down")
+var errBoom = errors.New("redis down")
 
 func TestProcessRetriesThenSucceeds(t *testing.T) {
-	f := &fakeScorer{scoreErrs: []error{boom, boom}}
+	f := &fakeScorer{scoreErrs: []error{errBoom, errBoom}}
 	c := &Consumer{scorer: f}
 	if !c.process(context.Background(), payment.Payment{TxnID: "t"}) {
 		t.Fatal("want resolved")
@@ -47,7 +47,7 @@ func TestProcessRetriesThenSucceeds(t *testing.T) {
 }
 
 func TestProcessGivesUpWithAnErrorRecord(t *testing.T) {
-	f := &fakeScorer{scoreErrs: []error{boom, boom, boom, boom}}
+	f := &fakeScorer{scoreErrs: []error{errBoom, errBoom, errBoom, errBoom}}
 	c := &Consumer{scorer: f}
 	if !c.process(context.Background(), payment.Payment{TxnID: "t"}) {
 		t.Fatal("an ERROR record counts as a result")
@@ -69,7 +69,7 @@ func TestProcessDoesNotRetryPermanentErrors(t *testing.T) {
 // If even the ERROR record can't be stored, the batch must not be
 // checkpointed, so the txn is read again later.
 func TestProcessUnresolvedWhenFailureCannotBeStored(t *testing.T) {
-	f := &fakeScorer{scoreErrs: []error{boom, boom, boom}, failureErr: boom}
+	f := &fakeScorer{scoreErrs: []error{errBoom, errBoom, errBoom}, failureErr: errBoom}
 	c := &Consumer{scorer: f}
 	if c.process(context.Background(), payment.Payment{TxnID: "t"}) {
 		t.Fatal("want unresolved")
