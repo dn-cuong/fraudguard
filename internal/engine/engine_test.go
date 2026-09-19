@@ -118,3 +118,46 @@ func TestEvaluateIPVelocity(t *testing.T) {
 		t.Fatalf("want ALLOW for IP-only, got %s score=%d", res.Decision, res.Score)
 	}
 }
+
+func TestEvaluateBoundaries(t *testing.T) {
+	cfg := DefaultConfig() // amount 2500, card limit 5, ip limit 20
+	e := New(cfg)
+	has := func(res payment.ScoreResult, id string) bool {
+		for _, r := range res.TriggeredRules {
+			if r.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	cases := []struct {
+		name   string
+		amount float64
+		snap   Snapshot
+		rule   string
+		want   bool
+	}{
+		{"amount just under", 2499.99, Snapshot{}, "AMOUNT_HIGH", false},
+		{"amount at threshold", 2500, Snapshot{}, "AMOUNT_HIGH", true},
+		{"card: this txn is the 5th", 10, Snapshot{CardVelocity: 4}, "VELOCITY_CARD", false},
+		{"card: this txn is the 6th", 10, Snapshot{CardVelocity: 5}, "VELOCITY_CARD", true},
+		{"ip: this txn is the 20th", 10, Snapshot{IPVelocity: 19}, "VELOCITY_IP", false},
+		{"ip: this txn is the 21st", 10, Snapshot{IPVelocity: 20}, "VELOCITY_IP", true},
+	}
+	for _, tc := range cases {
+		res := e.Evaluate(payment.Payment{CardID: "c", IP: "i", Amount: tc.amount}, tc.snap)
+		if got := has(res, tc.rule); got != tc.want {
+			t.Errorf("%s: %s triggered=%v, want %v", tc.name, tc.rule, got, tc.want)
+		}
+	}
+}
+
+func TestEvaluateScoreCutoffs(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DeclineScore, cfg.ReviewScore = 50, 40 // card velocity alone = 50
+	e := New(cfg)
+	res := e.Evaluate(payment.Payment{CardID: "c"}, Snapshot{CardVelocity: 5})
+	if res.Decision != payment.DecisionDecline || res.Score != 50 {
+		t.Fatalf("score == DeclineScore must decline, got %s/%d", res.Decision, res.Score)
+	}
+}
