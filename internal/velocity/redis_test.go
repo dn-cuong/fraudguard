@@ -83,8 +83,11 @@ func TestHitAlwaysSetsTTL(t *testing.T) {
 func TestHitWindowResets(t *testing.T) {
 	s, mr := newStore(t)
 	ctx := context.Background()
-	s.HitCard(ctx, "c1", "t1", time.Minute)
-	s.HitCard(ctx, "c1", "t2", time.Minute)
+	for _, id := range []string{"t1", "t2"} {
+		if _, err := s.HitCard(ctx, "c1", id, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
 	mr.FastForward(time.Minute + time.Second)
 	n, _ := s.HitCard(ctx, "c1", "t3", time.Minute)
 	if n != 1 {
