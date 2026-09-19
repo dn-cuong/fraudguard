@@ -2,6 +2,7 @@ package scorer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,10 +11,8 @@ import (
 )
 
 type velocityStore interface {
-	GetCard(ctx context.Context, cardID string) (int64, error)
-	GetIP(ctx context.Context, ip string) (int64, error)
-	IncrCard(ctx context.Context, cardID string, window time.Duration) (int64, error)
-	IncrIP(ctx context.Context, ip string, window time.Duration) (int64, error)
+	HitCard(ctx context.Context, cardID, txnID string, window time.Duration) (int64, error)
+	HitIP(ctx context.Context, ip, txnID string, window time.Duration) (int64, error)
 }
 
 type historyStore interface {
@@ -21,7 +20,13 @@ type historyStore interface {
 	Put(ctx context.Context, rec payment.Record) error
 }
 
-// Service reads shared state, evaluates rules, then writes counters + history.
+// ErrUnsupportedCurrency is returned for anything but USD. The amount rule
+// compares against a USD threshold and there is no FX conversion.
+var ErrUnsupportedCurrency = errors.New("only USD is supported")
+
+// Service scores one payment. Counters are hit first (atomic, per-txn
+// idempotent) and the returned counts feed the rules, so concurrent payments
+// on the same card each see a distinct count.
 type Service struct {
 	engine  *engine.Engine
 	vel     velocityStore
@@ -42,11 +47,15 @@ func (s *Service) Score(ctx context.Context, p payment.Payment) (payment.ScoreRe
 		p.Currency = "USD"
 	}
 
-	cardVel, err := s.vel.GetCard(ctx, p.CardID)
+	if p.Currency != "USD" {
+		return payment.ScoreResult{}, ErrUnsupportedCurrency
+	}
+
+	cardCount, err := s.vel.HitCard(ctx, p.CardID, p.TxnID, s.cfg.VelocityCardWindow)
 	if err != nil {
 		return payment.ScoreResult{}, fmt.Errorf("redis card velocity: %w", err)
 	}
-	ipVel, err := s.vel.GetIP(ctx, p.IP)
+	ipCount, err := s.vel.HitIP(ctx, p.IP, p.TxnID, s.cfg.VelocityIPWindow)
 	if err != nil {
 		return payment.ScoreResult{}, fmt.Errorf("redis ip velocity: %w", err)
 	}
@@ -56,17 +65,10 @@ func (s *Service) Score(ctx context.Context, p payment.Payment) (payment.ScoreRe
 	}
 
 	res := s.engine.Evaluate(p, engine.Snapshot{
-		CardVelocity: cardVel,
-		IPVelocity:   ipVel,
-		HadDispute:   hadDispute,
+		CardCount:  cardCount,
+		IPCount:    ipCount,
+		HadDispute: hadDispute,
 	})
-
-	if _, err := s.vel.IncrCard(ctx, p.CardID, s.cfg.VelocityCardWindow); err != nil {
-		return payment.ScoreResult{}, fmt.Errorf("redis incr card: %w", err)
-	}
-	if _, err := s.vel.IncrIP(ctx, p.IP, s.cfg.VelocityIPWindow); err != nil {
-		return payment.ScoreResult{}, fmt.Errorf("redis incr ip: %w", err)
-	}
 
 	rec := payment.Record{
 		TxnID:     p.TxnID,

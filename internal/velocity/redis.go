@@ -2,7 +2,6 @@ package velocity
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -36,45 +35,39 @@ func (s *Store) Close() error                   { return s.rdb.Close() }
 func cardKey(cardID string) string { return fmt.Sprintf("vel:card:%s", cardID) }
 func ipKey(ip string) string       { return fmt.Sprintf("vel:ip:%s", ip) }
 
-func (s *Store) GetCard(ctx context.Context, cardID string) (int64, error) {
-	n, err := s.rdb.Get(ctx, cardKey(cardID)).Int64()
-	if errors.Is(err, redis.Nil) {
-		return 0, nil
-	}
-	return n, err
+// hitScript counts a txn against a window in one atomic step.
+//
+//	KEYS[1] counter, KEYS[2] per-txn marker, ARGV[1] window in ms.
+//
+// The marker makes the hit idempotent: Kinesis can redeliver a record, and
+// the same txn must not be counted twice. The counter and its TTL are set in
+// the same script so a crash can't leave a counter that never expires.
+var hitScript = redis.NewScript(`
+if redis.call('SET', KEYS[2], 1, 'NX', 'PX', ARGV[1]) then
+  local n = redis.call('INCR', KEYS[1])
+  if n == 1 then
+    redis.call('PEXPIRE', KEYS[1], ARGV[1])
+  end
+  return n
+end
+return tonumber(redis.call('GET', KEYS[1]) or '0')
+`)
+
+// HitCard counts txnID against the card's window and returns the count
+// including this txn.
+func (s *Store) HitCard(ctx context.Context, cardID, txnID string, window time.Duration) (int64, error) {
+	return s.hit(ctx, cardKey(cardID), seenKey("card", cardID, txnID), window)
 }
 
-func (s *Store) GetIP(ctx context.Context, ip string) (int64, error) {
-	n, err := s.rdb.Get(ctx, ipKey(ip)).Int64()
-	if errors.Is(err, redis.Nil) {
-		return 0, nil
-	}
-	return n, err
+// HitIP is HitCard for an IP address.
+func (s *Store) HitIP(ctx context.Context, ip, txnID string, window time.Duration) (int64, error) {
+	return s.hit(ctx, ipKey(ip), seenKey("ip", ip, txnID), window)
 }
 
-func (s *Store) IncrCard(ctx context.Context, cardID string, window time.Duration) (int64, error) {
-	return s.incr(ctx, cardKey(cardID), window)
+func seenKey(kind, subject, txnID string) string {
+	return fmt.Sprintf("vel:seen:%s:%s:%s", kind, subject, txnID)
 }
 
-func (s *Store) IncrIP(ctx context.Context, ip string, window time.Duration) (int64, error) {
-	return s.incr(ctx, ipKey(ip), window)
+func (s *Store) hit(ctx context.Context, key, seen string, window time.Duration) (int64, error) {
+	return hitScript.Run(ctx, s.rdb, []string{key, seen}, window.Milliseconds()).Int64()
 }
-
-// incr bumps the counter and sets TTL only when the key is created.
-// Refreshing EXPIRE on every hit would keep busy keys alive forever and
-// break the "N txns per window" semantics advertised by the rules.
-func (s *Store) incr(ctx context.Context, key string, window time.Duration) (int64, error) {
-	n, err := s.rdb.Incr(ctx, key).Result()
-	if err != nil {
-		return 0, err
-	}
-	if shouldExpire(n) {
-		if err := s.rdb.Expire(ctx, key, window).Err(); err != nil {
-			return n, err
-		}
-	}
-	return n, nil
-}
-
-// shouldExpire is true when INCR just created the key (count == 1).
-func shouldExpire(n int64) bool { return n == 1 }
