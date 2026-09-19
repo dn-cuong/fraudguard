@@ -21,6 +21,8 @@ const (
 	DecisionAllow   Decision = "ALLOW"
 	DecisionReview  Decision = "REVIEW"
 	DecisionDecline Decision = "DECLINE"
+	// DecisionError means scoring failed for good; Record.Error says why.
+	DecisionError Decision = "ERROR"
 )
 
 type TriggeredRule struct {
@@ -51,4 +53,7 @@ type Record struct {
 	Score     int       `json:"score" dynamodbav:"score"`
 	Timestamp time.Time `json:"timestamp" dynamodbav:"timestamp"`
 	Disputed  bool      `json:"disputed" dynamodbav:"disputed"`
+	Error     string    `json:"error,omitempty" dynamodbav:"error,omitempty"`
+	// DisputeCardID is only set on disputed txns; it keys the sparse dispute-index.
+	DisputeCardID string `json:"-" dynamodbav:"dispute_card_id,omitempty"`
 }
