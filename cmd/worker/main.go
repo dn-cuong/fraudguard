@@ -11,11 +11,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mit/fraudguard/internal/cloudwatchx"
 	"github.com/mit/fraudguard/internal/config"
 	"github.com/mit/fraudguard/internal/engine"
 	"github.com/mit/fraudguard/internal/heartbeat"
 	"github.com/mit/fraudguard/internal/history"
+	"github.com/mit/fraudguard/internal/lease"
 	"github.com/mit/fraudguard/internal/scorer"
 	"github.com/mit/fraudguard/internal/stream"
 	"github.com/mit/fraudguard/internal/velocity"
@@ -47,7 +49,11 @@ func main() {
 	})
 	must(stream.EnsureStream(ctx, client, cfg.Kinesis.StreamName, 2))
 
-	worker := stream.NewWorker(client, cfg.Kinesis.StreamName, cfg.WorkerName, cfg.WorkerCount, cfg.WorkerReplicas, svc)
+	leases := lease.New(history.NewClient(cfg.HistoryConfig()), cfg.LeaseTable, 30*time.Second)
+	must(leases.EnsureTable(ctx))
+	// unique per process: a restarted worker must not be mistaken for the old one
+	owner := cfg.WorkerName + "-" + uuid.NewString()[:8]
+	worker := stream.NewConsumer(client, cfg.Kinesis.StreamName, owner, cfg.WorkerCount, leases, svc)
 	rep := heartbeat.New(cfg.WorkerName)
 	cw := cloudwatchx.New(ctx, cfg.Kinesis.Region, cfg.WorkerName)
 
@@ -80,7 +86,7 @@ func main() {
 				scored, errs, avgMs := worker.Stats()
 				rep.Set(scored, errs, avgMs)
 				cw.Beat(ctx)
-				slog.Info("heartbeat", "scored", scored, "errors", errs, "avg_latency_ms", avgMs)
+				slog.Info("heartbeat", "scored", scored, "errors", errs, "avg_latency_ms", avgMs, "shards", worker.Owned())
 			}
 		}
 	}()
@@ -88,8 +94,8 @@ func main() {
 	slog.Info("worker running",
 		"stream", cfg.Kinesis.StreamName,
 		"pool", cfg.WorkerCount,
-		"replicas", cfg.WorkerReplicas,
 		"name", cfg.WorkerName,
+		"owner", owner,
 	)
 	must(worker.Run(ctx))
 }

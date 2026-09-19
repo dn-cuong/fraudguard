@@ -190,6 +190,12 @@ resource "aws_api_gateway_integration_response" "payment_get_200" {
         "txn_id": "$input.params('txn_id')",
         "message": "Payment accepted; score not ready yet. Poll again shortly."
       }
+      #elseif($input.path('$.Items[0].decision.S') == "ERROR")
+      {
+        "status": "failed",
+        "txn_id": "$input.path('$.Items[0].txn_id.S')",
+        "error": "$util.escapeJavaScript($input.path('$.Items[0].error.S'))"
+      }
       #else
       #set($item = $input.path('$.Items[0]'))
       {

@@ -56,6 +56,17 @@ resource "aws_iam_role_policy" "worker" {
         ]
       },
       {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Scan",
+          "dynamodb:DescribeTable"
+        ]
+        Resource = aws_dynamodb_table.leases.arn
+      },
+      {
         Effect   = "Allow"
         Action   = ["cloudwatch:PutMetricData"]
         Resource = "*"

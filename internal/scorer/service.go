@@ -70,7 +70,30 @@ func (s *Service) Score(ctx context.Context, p payment.Payment) (payment.ScoreRe
 		HadDispute: hadDispute,
 	})
 
-	rec := payment.Record{
+	rec := newRecord(p)
+	rec.Decision, rec.Score = res.Decision, res.Score
+	if err := s.history.Put(ctx, rec); err != nil {
+		return payment.ScoreResult{}, fmt.Errorf("dynamodb put: %w", err)
+	}
+
+	res.LatencyMs = float64(time.Since(start).Microseconds()) / 1000.0
+	return res, nil
+}
+
+// RecordFailure stores an ERROR decision for a payment that can't be scored, so
+// the client sees "failed" instead of polling "pending" forever.
+func (s *Service) RecordFailure(ctx context.Context, p payment.Payment, cause error) error {
+	if p.Timestamp.IsZero() {
+		p.Timestamp = time.Now().UTC()
+	}
+	rec := newRecord(p)
+	rec.Decision = payment.DecisionError
+	rec.Error = cause.Error()
+	return s.history.Put(ctx, rec)
+}
+
+func newRecord(p payment.Payment) payment.Record {
+	return payment.Record{
 		TxnID:     p.TxnID,
 		CardID:    p.CardID,
 		UserID:    p.UserID,
@@ -79,14 +102,6 @@ func (s *Service) Score(ctx context.Context, p payment.Payment) (payment.ScoreRe
 		Merchant:  p.Merchant,
 		Country:   p.Country,
 		IP:        p.IP,
-		Decision:  res.Decision,
-		Score:     res.Score,
 		Timestamp: p.Timestamp,
 	}
-	if err := s.history.Put(ctx, rec); err != nil {
-		return payment.ScoreResult{}, fmt.Errorf("dynamodb put: %w", err)
-	}
-
-	res.LatencyMs = float64(time.Since(start).Microseconds()) / 1000.0
-	return res, nil
 }
