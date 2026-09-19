@@ -64,8 +64,8 @@ Workers partition Kinesis shards by `worker_name` index and `worker_replicas` so
 | Rule | Signal | Store |
 |------|--------|-------|
 | `AMOUNT_HIGH` | amount ≥ threshold (default $2500) | config |
-| `VELOCITY_CARD` | N txns / card / window | Redis |
-| `VELOCITY_IP` | N txns / IP / window | Redis |
+| `VELOCITY_CARD` | more than N txns / card / window | Redis |
+| `VELOCITY_IP` | more than N txns / IP / window | Redis |
 | `HISTORY_DISPUTE` | prior dispute on card | DynamoDB |
 
 Mark a scored txn as disputed (local ingest) so later payments on that card trip `HISTORY_DISPUTE`:
@@ -75,6 +75,8 @@ curl -s -X POST http://localhost:8080/v1/payments/TXN_ID/dispute \
   -H 'Content-Type: application/json' \
   -d '{"card_id":"card-1"}'
 ```
+
+Each txn is counted in Redis with one atomic Lua call (INCR + TTL + a per-txn marker), and the count it gets back is what the rules see. So concurrent payments on one card each get a different count, and a redelivered record isn't counted twice.
 
 Score stack: ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over `(payment, snapshot)` so any worker with the same snapshot scores the same way.
 
@@ -149,11 +151,13 @@ TODO: numbers from `make loadgen`. The old "sub-80ms / 1,000+ TPS" line was a ta
 
 ## Known limitations
 
-- Not idempotent. Redis counters go up before the DynamoDB write (`internal/scorer/service.go`), so if the write fails or Kinesis redelivers, the payment gets counted twice.
+- If the DynamoDB write fails there's no retry, so the txn is counted in Redis but has no record.
 - No checkpointing. Workers start at `LATEST` (`internal/stream/client.go`), so anything that arrives while they're all down is skipped.
 - A failed score is only logged. No retry, no DLQ, and the client just sees `pending` forever.
 - Shard split is static (worker index + `worker_replicas`). Change the host count without updating Ansible and records get scored twice or not at all. Resharding isn't handled.
 - Velocity is a fixed window from the first hit, so a burst split across two windows can stay under the limit.
+- USD only. Anything else is rejected, there's no FX.
+- Dispute lookup goes through a GSI, so a dispute shows up a moment after it's marked. Txns disputed before the `dispute-index` existed aren't in it.
 - SSH ingress is open by default, see Safety.
 
 ---
