@@ -24,10 +24,22 @@ resource "aws_dynamodb_table" "transactions" {
     type = "S"
   }
 
+  attribute {
+    name = "dispute_card_id"
+    type = "S"
+  }
+
   global_secondary_index {
     name            = "txn_id-index"
     hash_key        = "txn_id"
     projection_type = "ALL"
+  }
+
+  # sparse: only disputed txns have dispute_card_id
+  global_secondary_index {
+    name            = "dispute-index"
+    hash_key        = "dispute_card_id"
+    projection_type = "KEYS_ONLY"
   }
 }
 
