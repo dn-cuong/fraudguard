@@ -80,17 +80,62 @@ func TestHitAlwaysSetsTTL(t *testing.T) {
 	}
 }
 
-func TestHitWindowResets(t *testing.T) {
+func TestHitOldEntriesLeaveTheWindow(t *testing.T) {
 	s, mr := newStore(t)
 	ctx := context.Background()
-	for _, id := range []string{"t1", "t2"} {
-		if _, err := s.HitCard(ctx, "c1", id, time.Minute); err != nil {
+	t0 := time.Unix(1_800_000_000, 0)
+	var got []int64
+	for i, at := range []time.Duration{0, 40 * time.Second, 70 * time.Second} {
+		mr.SetTime(t0.Add(at))
+		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), time.Minute)
+		if err != nil {
 			t.Fatal(err)
 		}
+		got = append(got, n)
 	}
-	mr.FastForward(time.Minute + time.Second)
-	n, _ := s.HitCard(ctx, "c1", "t3", time.Minute)
-	if n != 1 {
-		t.Fatalf("want fresh window, got %d", n)
+	// at 70s the hit from 0s is out of the 60s window, the one from 40s is not
+	if got[0] != 1 || got[1] != 2 || got[2] != 2 {
+		t.Fatalf("want 1,2,2 got %v", got)
+	}
+}
+
+// A fixed window resets at the boundary, so 5 txns at 55s and 5 at 65s never
+// counted more than 5. A sliding window sees all 10 within 60s.
+func TestHitBurstAcrossWindowBoundary(t *testing.T) {
+	s, mr := newStore(t)
+	ctx := context.Background()
+	t0 := time.Unix(1_800_000_000, 0)
+	var last int64
+	for i := 0; i < 10; i++ {
+		at := 55 * time.Second
+		if i >= 5 {
+			at = 65 * time.Second
+		}
+		mr.SetTime(t0.Add(at))
+		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = n
+	}
+	if last != 10 {
+		t.Fatalf("want 10 in the sliding window, got %d", last)
+	}
+}
+
+func TestHitRedeliveryKeepsOriginalTime(t *testing.T) {
+	s, mr := newStore(t)
+	ctx := context.Background()
+	t0 := time.Unix(1_800_000_000, 0)
+	mr.SetTime(t0)
+	s.HitCard(ctx, "c1", "t1", time.Minute) //nolint:errcheck
+	mr.SetTime(t0.Add(50 * time.Second))
+	if n, _ := s.HitCard(ctx, "c1", "t1", time.Minute); n != 1 {
+		t.Fatalf("redelivery counted again: %d", n)
+	}
+	// t1 keeps its original timestamp, so it expires 60s after the first hit
+	mr.SetTime(t0.Add(65 * time.Second))
+	if n, _ := s.HitCard(ctx, "c1", "t2", time.Minute); n != 1 {
+		t.Fatalf("want only t2 left in window, got %d", n)
 	}
 }
