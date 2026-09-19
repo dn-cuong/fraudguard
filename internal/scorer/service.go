@@ -6,20 +6,30 @@ import (
 	"time"
 
 	"github.com/mit/fraudguard/internal/engine"
-	"github.com/mit/fraudguard/internal/history"
 	"github.com/mit/fraudguard/internal/payment"
-	"github.com/mit/fraudguard/internal/velocity"
 )
+
+type velocityStore interface {
+	GetCard(ctx context.Context, cardID string) (int64, error)
+	GetIP(ctx context.Context, ip string) (int64, error)
+	IncrCard(ctx context.Context, cardID string, window time.Duration) (int64, error)
+	IncrIP(ctx context.Context, ip string, window time.Duration) (int64, error)
+}
+
+type historyStore interface {
+	HasDispute(ctx context.Context, cardID string) (bool, error)
+	Put(ctx context.Context, rec payment.Record) error
+}
 
 // Service reads shared state, evaluates rules, then writes counters + history.
 type Service struct {
 	engine  *engine.Engine
-	vel     *velocity.Store
-	history *history.Store
+	vel     velocityStore
+	history historyStore
 	cfg     engine.Config
 }
 
-func New(eng *engine.Engine, vel *velocity.Store, hist *history.Store, cfg engine.Config) *Service {
+func New(eng *engine.Engine, vel velocityStore, hist historyStore, cfg engine.Config) *Service {
 	return &Service{engine: eng, vel: vel, history: hist, cfg: cfg}
 }
 
