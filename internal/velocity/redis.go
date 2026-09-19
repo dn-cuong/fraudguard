@@ -32,42 +32,38 @@ func NewWithClient(rdb *redis.Client) *Store {
 func (s *Store) Ping(ctx context.Context) error { return s.rdb.Ping(ctx).Err() }
 func (s *Store) Close() error                   { return s.rdb.Close() }
 
-func cardKey(cardID string) string { return fmt.Sprintf("vel:card:%s", cardID) }
-func ipKey(ip string) string       { return fmt.Sprintf("vel:ip:%s", ip) }
+func cardKey(cardID string) string { return fmt.Sprintf("win:card:%s", cardID) }
+func ipKey(ip string) string       { return fmt.Sprintf("win:ip:%s", ip) }
 
-// hitScript counts a txn against a window in one atomic step.
+// hitScript is a sliding window over a sorted set: member = txn_id, score =
+// time in ms. It drops entries older than the window, adds this txn and
+// returns the size.
 //
-//	KEYS[1] counter, KEYS[2] per-txn marker, ARGV[1] window in ms.
+//	KEYS[1] window set, ARGV[1] window in ms, ARGV[2] txn_id
 //
-// The marker makes the hit idempotent: Kinesis can redeliver a record, and
-// the same txn must not be counted twice. The counter and its TTL are set in
-// the same script so a crash can't leave a counter that never expires.
+// Time comes from Redis, so every worker uses the same clock. ZADD NX makes it
+// idempotent: a redelivered txn keeps its original timestamp and isn't counted
+// twice. All of it is one script, so it's atomic and the TTL can't get lost.
 var hitScript = redis.NewScript(`
-if redis.call('SET', KEYS[2], 1, 'NX', 'PX', ARGV[1]) then
-  local n = redis.call('INCR', KEYS[1])
-  if n == 1 then
-    redis.call('PEXPIRE', KEYS[1], ARGV[1])
-  end
-  return n
-end
-return tonumber(redis.call('GET', KEYS[1]) or '0')
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - ARGV[1])
+redis.call('ZADD', KEYS[1], 'NX', now, ARGV[2])
+redis.call('PEXPIRE', KEYS[1], ARGV[1])
+return redis.call('ZCARD', KEYS[1])
 `)
 
-// HitCard counts txnID against the card's window and returns the count
-// including this txn.
+// HitCard counts txnID in the card's sliding window and returns how many txns
+// (including this one) the card has made in the last `window`.
 func (s *Store) HitCard(ctx context.Context, cardID, txnID string, window time.Duration) (int64, error) {
-	return s.hit(ctx, cardKey(cardID), seenKey("card", cardID, txnID), window)
+	return s.hit(ctx, cardKey(cardID), txnID, window)
 }
 
 // HitIP is HitCard for an IP address.
 func (s *Store) HitIP(ctx context.Context, ip, txnID string, window time.Duration) (int64, error) {
-	return s.hit(ctx, ipKey(ip), seenKey("ip", ip, txnID), window)
+	return s.hit(ctx, ipKey(ip), txnID, window)
 }
 
-func seenKey(kind, subject, txnID string) string {
-	return fmt.Sprintf("vel:seen:%s:%s:%s", kind, subject, txnID)
-}
-
-func (s *Store) hit(ctx context.Context, key, seen string, window time.Duration) (int64, error) {
-	return hitScript.Run(ctx, s.rdb, []string{key, seen}, window.Milliseconds()).Int64()
+func (s *Store) hit(ctx context.Context, key, txnID string, window time.Duration) (int64, error) {
+	return hitScript.Run(ctx, s.rdb, []string{key}, window.Milliseconds(), txnID).Int64()
 }
