@@ -45,6 +45,19 @@ jobs:
       - name: Cross-compile worker (Linux/amd64, as deployed by Ansible)
         run: GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/worker
 
+  stack:
+    name: Docker images + compose smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build images, start the full stack, POST a payment and poll it to scored
+        run: timeout 600 make stack-smoke
+      - name: logs
+        if: failure()
+        run: docker compose --profile full logs --no-color --tail 200
+      - if: always()
+        run: docker compose --profile full down
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest

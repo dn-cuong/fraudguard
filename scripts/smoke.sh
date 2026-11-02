@@ -24,7 +24,8 @@ if [[ -z "$TXN_ID" ]]; then
 fi
 
 echo "GET /v1/payments/$TXN_ID (poll until scored) ..."
-for i in $(seq 1 30); do
+# a worker that just started needs a few seconds to take its shards
+for i in $(seq 1 "${TRIES:-30}"); do
   STATUS_RESP=$(curl -sf "$BASE/v1/payments/$TXN_ID")
   STATUS=$(echo "$STATUS_RESP" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
   if [[ "$STATUS" == "scored" ]]; then
