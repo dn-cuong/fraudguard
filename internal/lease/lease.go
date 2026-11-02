@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/dn-cuong/fraudguard/internal/history"
 )
 
 // ErrHeld means the lease is owned by someone else (or the shard is finished).
@@ -52,7 +53,7 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 	if _, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(s.table)}); err == nil {
 		return nil
 	}
-	_, err := s.client.CreateTable(ctx, &dynamodb.CreateTableInput{
+	_, err := history.CreateTable(ctx, s.client, &dynamodb.CreateTableInput{
 		TableName: aws.String(s.table),
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("shard_id"), AttributeType: types.ScalarAttributeTypeS},
@@ -62,11 +63,7 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 		},
 		BillingMode: types.BillingModePayPerRequest,
 	})
-	if err != nil {
-		return fmt.Errorf("create lease table: %w", err)
-	}
-	return dynamodb.NewTableExistsWaiter(s.client).Wait(ctx,
-		&dynamodb.DescribeTableInput{TableName: aws.String(s.table)}, 30*time.Second)
+	return err
 }
 
 func (s *Store) expiry() types.AttributeValue {
