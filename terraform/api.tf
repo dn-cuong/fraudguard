@@ -60,6 +60,38 @@ resource "aws_api_gateway_resource" "payment_by_id" {
   path_part   = "{txn_id}"
 }
 
+resource "aws_api_gateway_request_validator" "body" {
+  rest_api_id           = aws_api_gateway_rest_api.ingest.id
+  name                  = "body"
+  validate_request_body = true
+}
+
+# The worker can't report a record it can't parse, so a bad body has to be
+# rejected here or the client polls "pending" forever. The strict card_id pattern
+# also keeps it safe to paste into the PutRecord template below. txn_id and
+# timestamp are server-set, so they aren't accepted.
+resource "aws_api_gateway_model" "payment" {
+  rest_api_id  = aws_api_gateway_rest_api.ingest.id
+  name         = "Payment"
+  content_type = "application/json"
+
+  schema = jsonencode({
+    "$schema" = "http://json-schema.org/draft-04/schema#"
+    type      = "object"
+    required  = ["card_id", "amount"]
+    properties = {
+      card_id  = { type = "string", pattern = "^[A-Za-z0-9_-]{1,128}$" }
+      amount   = { type = "number", minimum = 0, exclusiveMinimum = true }
+      currency = { type = "string", enum = ["USD"] }
+      user_id  = { type = "string" }
+      merchant = { type = "string" }
+      country  = { type = "string" }
+      ip       = { type = "string" }
+    }
+    additionalProperties = false
+  })
+}
+
 # ---- POST /payments → Kinesis ----
 
 resource "aws_api_gateway_method" "payments_post" {
@@ -67,6 +99,11 @@ resource "aws_api_gateway_method" "payments_post" {
   resource_id   = aws_api_gateway_resource.payments.id
   http_method   = "POST"
   authorization = "NONE"
+
+  request_validator_id = aws_api_gateway_request_validator.body.id
+  request_models = {
+    "application/json" = aws_api_gateway_model.payment.name
+  }
 }
 
 resource "aws_api_gateway_integration" "payments_kinesis" {
@@ -84,14 +121,10 @@ resource "aws_api_gateway_integration" "payments_kinesis" {
       #set($body = $util.parseJson($input.body))
       ## Always assign a server txn_id so clients can poll GET /payments/{txn_id}
       #set($body.txn_id = $context.requestId)
-      #set($pk = $body.card_id)
-      #if(!$pk || $pk == "")
-        #set($pk = "unknown")
-      #end
       {
         "StreamName": "${aws_kinesis_stream.payments.name}",
         "Data": "$util.base64Encode($util.toJson($body))",
-        "PartitionKey": "$pk"
+        "PartitionKey": "$body.card_id"
       }
     EOF
   }
@@ -128,6 +161,29 @@ resource "aws_api_gateway_integration_response" "payments_post_200" {
   }
 }
 
+# Without this, a throttled or failed PutRecord falls through to the 200 above
+# and the client is told "queued" for a payment that was never queued.
+resource "aws_api_gateway_method_response" "payments_post_502" {
+  rest_api_id = aws_api_gateway_rest_api.ingest.id
+  resource_id = aws_api_gateway_resource.payments.id
+  http_method = aws_api_gateway_method.payments_post.http_method
+  status_code = "502"
+}
+
+resource "aws_api_gateway_integration_response" "payments_post_502" {
+  rest_api_id       = aws_api_gateway_rest_api.ingest.id
+  resource_id       = aws_api_gateway_resource.payments.id
+  http_method       = aws_api_gateway_method.payments_post.http_method
+  status_code       = aws_api_gateway_method_response.payments_post_502.status_code
+  selection_pattern = "[45]\\d{2}"
+
+  depends_on = [aws_api_gateway_integration.payments_kinesis]
+
+  response_templates = {
+    "application/json" = jsonencode({ message = "could not queue payment, retry" })
+  }
+}
+
 # ---- GET /payments/{txn_id} → DynamoDB ----
 
 resource "aws_api_gateway_method" "payment_get" {
@@ -158,7 +214,7 @@ resource "aws_api_gateway_integration" "payment_dynamo" {
         "IndexName": "txn_id-index",
         "KeyConditionExpression": "txn_id = :t",
         "ExpressionAttributeValues": {
-          ":t": { "S": "$input.params('txn_id')" }
+          ":t": { "S": "$util.escapeJavaScript($input.params('txn_id'))" }
         },
         "Limit": 1
       }
@@ -213,6 +269,28 @@ resource "aws_api_gateway_integration_response" "payment_get_200" {
   }
 }
 
+# A failed Query has no Count, so without this it renders as an empty "scored".
+resource "aws_api_gateway_method_response" "payment_get_502" {
+  rest_api_id = aws_api_gateway_rest_api.ingest.id
+  resource_id = aws_api_gateway_resource.payment_by_id.id
+  http_method = aws_api_gateway_method.payment_get.http_method
+  status_code = "502"
+}
+
+resource "aws_api_gateway_integration_response" "payment_get_502" {
+  rest_api_id       = aws_api_gateway_rest_api.ingest.id
+  resource_id       = aws_api_gateway_resource.payment_by_id.id
+  http_method       = aws_api_gateway_method.payment_get.http_method
+  status_code       = aws_api_gateway_method_response.payment_get_502.status_code
+  selection_pattern = "[45]\\d{2}"
+
+  depends_on = [aws_api_gateway_integration.payment_dynamo]
+
+  response_templates = {
+    "application/json" = jsonencode({ message = "could not read payment, retry" })
+  }
+}
+
 resource "aws_api_gateway_deployment" "ingest" {
   rest_api_id = aws_api_gateway_rest_api.ingest.id
 
@@ -223,17 +301,24 @@ resource "aws_api_gateway_deployment" "ingest" {
       aws_api_gateway_method.payments_post.id,
       aws_api_gateway_integration.payments_kinesis.id,
       aws_api_gateway_integration_response.payments_post_200.id,
+      aws_api_gateway_integration_response.payments_post_502.id,
+      aws_api_gateway_model.payment.schema,
+      aws_api_gateway_integration.payments_kinesis.request_templates,
       aws_api_gateway_method.payment_get.id,
       aws_api_gateway_integration.payment_dynamo.id,
       aws_api_gateway_integration_response.payment_get_200.id,
+      aws_api_gateway_integration_response.payment_get_502.id,
+      aws_api_gateway_integration.payment_dynamo.request_templates,
     ]))
   }
 
   depends_on = [
     aws_api_gateway_integration.payments_kinesis,
     aws_api_gateway_integration_response.payments_post_200,
+    aws_api_gateway_integration_response.payments_post_502,
     aws_api_gateway_integration.payment_dynamo,
     aws_api_gateway_integration_response.payment_get_200,
+    aws_api_gateway_integration_response.payment_get_502,
   ]
 
   lifecycle {

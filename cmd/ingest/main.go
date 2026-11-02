@@ -82,9 +82,8 @@ func main() {
 			http.Error(w, scorer.ErrUnsupportedCurrency.Error(), http.StatusBadRequest)
 			return
 		}
-		if p.Timestamp.IsZero() {
-			p.Timestamp = time.Now().UTC()
-		}
+		// velocity windows run on this, so it can't be a client-supplied value
+		p.Timestamp = time.Now().UTC()
 
 		if producer != nil {
 			if err := producer.Put(r.Context(), p); err != nil {

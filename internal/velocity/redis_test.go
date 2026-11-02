@@ -12,6 +12,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var t0 = time.Unix(1_800_000_000, 0)
+
 func newStore(t *testing.T) (*Store, *miniredis.Miniredis) {
 	t.Helper()
 	mr := miniredis.RunT(t)
@@ -22,7 +24,7 @@ func TestHitCountsIncludeCurrentTxn(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
 	for i := 1; i <= 3; i++ {
-		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), time.Minute)
+		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), t0, time.Minute)
 		if err != nil || n != int64(i) {
 			t.Fatalf("hit %d: n=%d err=%v", i, n, err)
 		}
@@ -40,7 +42,7 @@ func TestHitConcurrentCountsAreDistinct(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), time.Minute)
+			c, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), t0, time.Minute)
 			if err != nil {
 				t.Error(err)
 			}
@@ -59,9 +61,9 @@ func TestHitConcurrentCountsAreDistinct(t *testing.T) {
 func TestHitSameTxnCountsOnce(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := context.Background()
-	a, _ := s.HitIP(ctx, "1.1.1.1", "t1", time.Minute)
-	b, _ := s.HitIP(ctx, "1.1.1.1", "t1", time.Minute) // redelivery
-	c, _ := s.HitIP(ctx, "1.1.1.1", "t2", time.Minute)
+	a, _ := s.HitIP(ctx, "1.1.1.1", "t1", t0, time.Minute)
+	b, _ := s.HitIP(ctx, "1.1.1.1", "t1", t0, time.Minute) // redelivery
+	c, _ := s.HitIP(ctx, "1.1.1.1", "t2", t0, time.Minute)
 	if a != 1 || b != 1 || c != 2 {
 		t.Fatalf("want 1,1,2 got %d,%d,%d", a, b, c)
 	}
@@ -71,23 +73,21 @@ func TestHitAlwaysSetsTTL(t *testing.T) {
 	s, mr := newStore(t)
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		if _, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), time.Minute); err != nil {
+		if _, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), t0, time.Minute); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if ttl := mr.TTL(cardKey("c1")); ttl <= 0 || ttl > time.Minute {
+	if ttl := mr.TTL(cardKey("c1")); ttl <= 0 || ttl > time.Minute+reorderSlack {
 		t.Fatalf("counter ttl = %v", ttl)
 	}
 }
 
 func TestHitOldEntriesLeaveTheWindow(t *testing.T) {
-	s, mr := newStore(t)
+	s, _ := newStore(t)
 	ctx := context.Background()
-	t0 := time.Unix(1_800_000_000, 0)
 	var got []int64
 	for i, at := range []time.Duration{0, 40 * time.Second, 70 * time.Second} {
-		mr.SetTime(t0.Add(at))
-		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), time.Minute)
+		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), t0.Add(at), time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -102,17 +102,15 @@ func TestHitOldEntriesLeaveTheWindow(t *testing.T) {
 // A fixed window resets at the boundary, so 5 txns at 55s and 5 at 65s never
 // counted more than 5. A sliding window sees all 10 within 60s.
 func TestHitBurstAcrossWindowBoundary(t *testing.T) {
-	s, mr := newStore(t)
+	s, _ := newStore(t)
 	ctx := context.Background()
-	t0 := time.Unix(1_800_000_000, 0)
 	var last int64
 	for i := 0; i < 10; i++ {
 		at := 55 * time.Second
 		if i >= 5 {
 			at = 65 * time.Second
 		}
-		mr.SetTime(t0.Add(at))
-		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), time.Minute)
+		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), t0.Add(at), time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,18 +122,39 @@ func TestHitBurstAcrossWindowBoundary(t *testing.T) {
 }
 
 func TestHitRedeliveryKeepsOriginalTime(t *testing.T) {
-	s, mr := newStore(t)
+	s, _ := newStore(t)
 	ctx := context.Background()
-	t0 := time.Unix(1_800_000_000, 0)
-	mr.SetTime(t0)
-	s.HitCard(ctx, "c1", "t1", time.Minute) //nolint:errcheck
-	mr.SetTime(t0.Add(50 * time.Second))
-	if n, _ := s.HitCard(ctx, "c1", "t1", time.Minute); n != 1 {
+	s.HitCard(ctx, "c1", "t1", t0, time.Minute) //nolint:errcheck
+	if n, _ := s.HitCard(ctx, "c1", "t1", t0, time.Minute); n != 1 {
 		t.Fatalf("redelivery counted again: %d", n)
 	}
-	// t1 keeps its original timestamp, so it expires 60s after the first hit
-	mr.SetTime(t0.Add(65 * time.Second))
-	if n, _ := s.HitCard(ctx, "c1", "t2", time.Minute); n != 1 {
+	// t1 keeps its original timestamp, so it leaves 60s after it arrived
+	if n, _ := s.HitCard(ctx, "c1", "t2", t0.Add(65*time.Second), time.Minute); n != 1 {
 		t.Fatalf("want only t2 left in window, got %d", n)
+	}
+}
+
+// Payments a minute apart, scored in one go after an outage, are not a burst.
+func TestHitBacklogUsesArrivalTime(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		n, err := s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), t0.Add(time.Duration(i)*time.Minute), time.Minute)
+		if err != nil || n != 1 {
+			t.Fatalf("txn %d: n=%d err=%v", i, n, err)
+		}
+	}
+}
+
+// The pool can score a burst out of order; it still has to add up.
+func TestHitOutOfOrderBurstStillCounts(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	var last int64
+	for i := 5; i >= 0; i-- { // latest arrival scored first
+		last, _ = s.HitCard(ctx, "c1", fmt.Sprintf("t%d", i), t0.Add(time.Duration(i)*50*time.Millisecond), time.Minute)
+	}
+	if last != 6 {
+		t.Fatalf("want 6, got %d", last)
 	}
 }

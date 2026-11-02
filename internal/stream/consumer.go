@@ -48,6 +48,7 @@ type Consumer struct {
 	jobs     chan job
 	mu       sync.Mutex
 	readers  map[string]*reader
+	running  sync.WaitGroup // every reader goroutine, including ones already dropped from readers
 	scored   atomic.Int64
 	errors   atomic.Int64
 	latSumUs atomic.Int64
@@ -261,7 +262,9 @@ func (c *Consumer) start(ctx context.Context, shardID, checkpoint string) {
 	c.readers[shardID] = r
 	c.mu.Unlock()
 	slog.Info("shard acquired", "shard", shardID, "checkpoint", checkpoint)
+	c.running.Add(1)
 	go func() {
+		defer c.running.Done()
 		defer close(r.done)
 		c.readShard(rctx, shardID, checkpoint)
 		// give the shard back right away, even when ctx is cancelled
@@ -281,9 +284,8 @@ func (c *Consumer) stopAll() {
 	for _, r := range rs {
 		r.cancel()
 	}
-	for _, r := range rs {
-		<-r.done
-	}
+	// Run closes jobs next, so a reader rebalance just gave up must be gone too
+	c.running.Wait()
 }
 
 func (c *Consumer) listShards(ctx context.Context) ([]types.Shard, error) {
@@ -401,9 +403,8 @@ func (c *Consumer) processBatch(ctx context.Context, shardID string, recs []type
 			slog.Error("bad record skipped", "shard", shardID, "seq", aws.ToString(rec.SequenceNumber))
 			continue
 		}
-		if p.Timestamp.IsZero() {
-			p.Timestamp = rec.ApproximateArrivalTimestamp.UTC()
-		}
+		// velocity windows run on this, so it can't be a client-supplied value
+		p.Timestamp = aws.ToTime(rec.ApproximateArrivalTimestamp).UTC()
 		b.wg.Add(1)
 		select {
 		case c.jobs <- job{ctx: ctx, p: p, batch: b}:

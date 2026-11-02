@@ -11,8 +11,8 @@ import (
 )
 
 type velocityStore interface {
-	HitCard(ctx context.Context, cardID, txnID string, window time.Duration) (int64, error)
-	HitIP(ctx context.Context, ip, txnID string, window time.Duration) (int64, error)
+	HitCard(ctx context.Context, cardID, txnID string, at time.Time, window time.Duration) (int64, error)
+	HitIP(ctx context.Context, ip, txnID string, at time.Time, window time.Duration) (int64, error)
 }
 
 type historyStore interface {
@@ -51,13 +51,17 @@ func (s *Service) Score(ctx context.Context, p payment.Payment) (payment.ScoreRe
 		return payment.ScoreResult{}, ErrUnsupportedCurrency
 	}
 
-	cardCount, err := s.vel.HitCard(ctx, p.CardID, p.TxnID, s.cfg.VelocityCardWindow)
+	cardCount, err := s.vel.HitCard(ctx, p.CardID, p.TxnID, p.Timestamp, s.cfg.VelocityCardWindow)
 	if err != nil {
 		return payment.ScoreResult{}, fmt.Errorf("redis card velocity: %w", err)
 	}
-	ipCount, err := s.vel.HitIP(ctx, p.IP, p.TxnID, s.cfg.VelocityIPWindow)
-	if err != nil {
-		return payment.ScoreResult{}, fmt.Errorf("redis ip velocity: %w", err)
+	// ip is optional; without this, every IP-less payment shares one counter
+	var ipCount int64
+	if p.IP != "" {
+		ipCount, err = s.vel.HitIP(ctx, p.IP, p.TxnID, p.Timestamp, s.cfg.VelocityIPWindow)
+		if err != nil {
+			return payment.ScoreResult{}, fmt.Errorf("redis ip velocity: %w", err)
+		}
 	}
 	hadDispute, err := s.history.HasDispute(ctx, p.CardID)
 	if err != nil {
