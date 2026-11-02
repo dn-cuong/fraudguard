@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/dn-cuong/fraudguard/internal/payment"
 	"github.com/google/uuid"
@@ -53,5 +54,25 @@ func TestPutKeepsFirstResultAndDisputeFlag(t *testing.T) {
 	}
 	if ok, _ := s.HasDispute(ctx, "other-card"); ok {
 		t.Fatal("dispute leaked to another card")
+	}
+}
+
+func TestPutSetsTTLAndDisputeClearsIt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, txn := range []string{"keep", "drop"} {
+		if err := s.Put(ctx, payment.Record{TxnID: txn, CardID: "c1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _ := s.GetByTxnID(ctx, "drop")
+	if want := time.Now().Add(retention).Unix(); got == nil || got.ExpiresAt < want-60 || got.ExpiresAt > want {
+		t.Fatalf("expires_at not ~90 days out: %+v", got)
+	}
+	if err := s.MarkDisputed(ctx, "c1", "keep"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetByTxnID(ctx, "keep"); got == nil || got.ExpiresAt != 0 {
+		t.Fatalf("disputed txn would still expire: %+v", got)
 	}
 }

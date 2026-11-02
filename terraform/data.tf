@@ -35,6 +35,12 @@ resource "aws_dynamodb_table" "transactions" {
     projection_type = "ALL"
   }
 
+  # 90 days, set by the worker; disputed txns have no expires_at and stay
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
   # sparse: only disputed txns have dispute_card_id
   global_secondary_index {
     name            = "dispute-index"

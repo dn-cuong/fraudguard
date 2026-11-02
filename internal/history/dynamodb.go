@@ -26,6 +26,10 @@ type Config struct {
 
 const disputeIndex = "dispute-index"
 
+// retention is how long a scored txn is kept. Disputed txns are kept for good,
+// since HISTORY_DISPUTE would otherwise forget them.
+const retention = 90 * 24 * time.Hour
+
 // ErrNotFound means the txn doesn't exist on that card.
 var ErrNotFound = errors.New("transaction not found")
 
@@ -120,15 +124,27 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 	}
 
 	waiter := dynamodb.NewTableExistsWaiter(s.client)
-	return waiter.Wait(ctx, &dynamodb.DescribeTableInput{
+	if err := waiter.Wait(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(s.tableName),
-	}, 30*time.Second)
+	}, 30*time.Second); err != nil {
+		return err
+	}
+	// on AWS Terraform owns this; here it's for tables created locally
+	_, err = s.client.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+		TableName: aws.String(s.tableName),
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{
+			AttributeName: aws.String("expires_at"),
+			Enabled:       aws.Bool(true),
+		},
+	})
+	return err
 }
 
 // Put stores a txn once. If the txn_id is already there (a redelivered record,
 // or one that was disputed after scoring) it does nothing, so a replay can't
 // overwrite the first result or wipe the disputed flag.
 func (s *Store) Put(ctx context.Context, rec payment.Record) error {
+	rec.ExpiresAt = time.Now().Add(retention).Unix()
 	item, err := attributevalue.MarshalMap(rec)
 	if err != nil {
 		return err
@@ -164,7 +180,8 @@ func (s *Store) HasDispute(ctx context.Context, cardID string) (bool, error) {
 	return len(out.Items) > 0, nil
 }
 
-// MarkDisputed sets disputed=true on an existing txn so HISTORY_DISPUTE can fire.
+// MarkDisputed sets disputed=true on an existing txn so HISTORY_DISPUTE can fire,
+// and drops its TTL so the dispute is never forgotten.
 func (s *Store) MarkDisputed(ctx context.Context, cardID, txnID string) error {
 	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.tableName),
@@ -172,7 +189,7 @@ func (s *Store) MarkDisputed(ctx context.Context, cardID, txnID string) error {
 			"card_id": &types.AttributeValueMemberS{Value: cardID},
 			"txn_id":  &types.AttributeValueMemberS{Value: txnID},
 		},
-		UpdateExpression:    aws.String("SET disputed = :d, dispute_card_id = :c"),
+		UpdateExpression:    aws.String("SET disputed = :d, dispute_card_id = :c REMOVE expires_at"),
 		ConditionExpression: aws.String("attribute_exists(txn_id)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":d": &types.AttributeValueMemberBOOL{Value: true},
