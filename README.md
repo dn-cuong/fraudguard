@@ -109,7 +109,7 @@ Score stack: each rule adds its weight (`weight_*` in the config), ≥80 `DECLIN
 
 ## Local
 
-Needs Go 1.25+ and Docker Desktop.
+Needs Go 1.26.10+ and Docker Desktop.
 
 ```bash
 docker compose up -d redis dynamodb
