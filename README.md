@@ -86,7 +86,7 @@ Each txn is counted in Redis with one atomic Lua call on a sorted set of txn_ids
 
 Windows run on arrival time (Kinesis arrival, or the ingest clock in score mode), not the time of scoring, so draining a backlog after an outage doesn't look like a burst. Client-supplied timestamps are ignored: they would let a caller dodge the velocity rules. Txns up to 1s apart still count each other when scored out of order. Payments without an `ip` skip `VELOCITY_IP`.
 
-Score stack: ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over `(payment, snapshot)` so any worker with the same snapshot scores the same way.
+Score stack: each rule adds its weight (`weight_*` in the config), ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over `(payment, snapshot)` so any worker with the same snapshot scores the same way.
 
 ---
 

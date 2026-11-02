@@ -161,3 +161,13 @@ func TestEvaluateScoreCutoffs(t *testing.T) {
 		t.Fatalf("score == DeclineScore must decline, got %s/%d", res.Decision, res.Score)
 	}
 }
+
+func TestEvaluateUsesConfiguredWeights(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WeightAmountHigh = 7
+	cfg.WeightDispute = 11
+	res := New(cfg).Evaluate(payment.Payment{Amount: cfg.AmountHighUSD}, Snapshot{HadDispute: true})
+	if res.Score != 18 {
+		t.Fatalf("want 7+11, got %d", res.Score)
+	}
+}
