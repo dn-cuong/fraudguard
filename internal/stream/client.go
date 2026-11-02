@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -78,7 +79,9 @@ func EnsureStream(ctx context.Context, client *kinesis.Client, name string, shar
 		StreamName: aws.String(name),
 		ShardCount: aws.Int32(shardCount),
 	})
-	if err != nil {
+	// ingest and worker start together and race to create it; losing is fine
+	var exists *types.ResourceInUseException
+	if err != nil && !errors.As(err, &exists) {
 		return fmt.Errorf("create stream: %w", err)
 	}
 	deadline := time.Now().Add(60 * time.Second)

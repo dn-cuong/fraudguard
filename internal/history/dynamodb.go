@@ -91,7 +91,7 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 		return nil
 	}
 
-	_, err = s.client.CreateTable(ctx, &dynamodb.CreateTableInput{
+	created, err := CreateTable(ctx, s.client, &dynamodb.CreateTableInput{
 		TableName: aws.String(s.tableName),
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("card_id"), AttributeType: types.ScalarAttributeTypeS},
@@ -119,17 +119,11 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 		}},
 		BillingMode: types.BillingModePayPerRequest,
 	})
-	if err != nil {
-		return fmt.Errorf("create table: %w", err)
-	}
-
-	waiter := dynamodb.NewTableExistsWaiter(s.client)
-	if err := waiter.Wait(ctx, &dynamodb.DescribeTableInput{
-		TableName: aws.String(s.tableName),
-	}, 30*time.Second); err != nil {
+	if err != nil || !created {
 		return err
 	}
-	// on AWS Terraform owns this; here it's for tables created locally
+	// On AWS Terraform owns this; here it's for tables created locally. Only
+	// the process that created the table sets it: a second call errors.
 	_, err = s.client.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
 		TableName: aws.String(s.tableName),
 		TimeToLiveSpecification: &types.TimeToLiveSpecification{
@@ -138,6 +132,24 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 		},
 	})
 	return err
+}
+
+// CreateTable creates a table and waits until it's usable. Processes starting
+// together (ingest and worker) race to create the same table, so losing that
+// race is fine: created is false, and the caller still gets a usable table.
+func CreateTable(ctx context.Context, client *dynamodb.Client, in *dynamodb.CreateTableInput) (created bool, err error) {
+	_, err = client.CreateTable(ctx, in)
+	var exists *types.ResourceInUseException
+	switch {
+	case err == nil:
+		created = true
+	case errors.As(err, &exists):
+	default:
+		return false, fmt.Errorf("create table %s: %w", aws.ToString(in.TableName), err)
+	}
+	err = dynamodb.NewTableExistsWaiter(client).Wait(ctx,
+		&dynamodb.DescribeTableInput{TableName: in.TableName}, 30*time.Second)
+	return created, err
 }
 
 // Put stores a txn once. If the txn_id is already there (a redelivered record,

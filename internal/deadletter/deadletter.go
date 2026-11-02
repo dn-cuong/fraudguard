@@ -5,13 +5,13 @@ package deadletter
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/dn-cuong/fraudguard/internal/history"
 )
 
 // retention is how long a dead letter is kept before DynamoDB TTL drops it.
@@ -30,7 +30,7 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 	if _, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(s.table)}); err == nil {
 		return nil
 	}
-	_, err := s.client.CreateTable(ctx, &dynamodb.CreateTableInput{
+	_, err := history.CreateTable(ctx, s.client, &dynamodb.CreateTableInput{
 		TableName: aws.String(s.table),
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("shard_id"), AttributeType: types.ScalarAttributeTypeS},
@@ -42,11 +42,7 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 		},
 		BillingMode: types.BillingModePayPerRequest,
 	})
-	if err != nil {
-		return fmt.Errorf("create dead letter table: %w", err)
-	}
-	return dynamodb.NewTableExistsWaiter(s.client).Wait(ctx,
-		&dynamodb.DescribeTableInput{TableName: aws.String(s.table)}, 30*time.Second)
+	return err
 }
 
 // Put stores one record. Keyed by shard and sequence number, so a replayed
