@@ -72,7 +72,7 @@ These were run before the arrival-time velocity and dead-letter changes and have
 
 ## Known limitations
 
-- Not run on real AWS yet: only `terraform validate` and the local runs above.
+- Deployed on real AWS once, in August 2026. Later changes, including the API Gateway validation and error responses, the lease and dead-letter tables, `dispute-index` and DynamoDB TTL, have only been checked with `terraform validate` and the local runs above.
 - Lease expiry uses each worker's own clock, so hosts need roughly synced time (chrony on the AL2023 AMI does this). The 30s lease is far above normal skew.
 - Deliveries are at-least-once. A replayed txn is counted at its original arrival time, so it can't inflate the current window.
 - A backlog that drains slower than real time can undercount: a card's Redis key expires on wall-clock time, so it can vanish between two of that card's txns.

@@ -10,7 +10,7 @@
 
 Payments enter through API Gateway into Kinesis. Go workers score them against velocity counters in Redis and card history in DynamoDB, and the client polls for the decision. Infrastructure is Terraform, workers are deployed with Ansible, and CloudWatch alarms on missing heartbeats and unscorable records.
 
-> **Status:** a side project about what happens when several scorer replicas share state. It's rules only, no ML. Everything runs locally against Docker (Redis, DynamoDB Local, LocalStack Kinesis), and the Terraform validates, but it has **not been run on real AWS yet**.
+> **Status:** a side project about what happens when several scorer replicas share state. It's rules only, no ML. It has run on real AWS (deployed with Terraform in August 2026, then torn down to save cost), and everything also runs locally against Docker (Redis, DynamoDB Local, LocalStack Kinesis). Changes merged since that deployment haven't been on AWS yet.
 
 ## Quick start
 
