@@ -13,15 +13,19 @@ import (
 type fakeVel struct {
 	card, ip int64 // counts to report, including the txn being scored
 	hits     int
+	ipHits   int
+	at       time.Time
 	err      error
 }
 
-func (f *fakeVel) HitCard(context.Context, string, string, time.Duration) (int64, error) {
+func (f *fakeVel) HitCard(_ context.Context, _, _ string, at time.Time, _ time.Duration) (int64, error) {
 	f.hits++
+	f.at = at
 	return f.card, f.err
 }
-func (f *fakeVel) HitIP(context.Context, string, string, time.Duration) (int64, error) {
+func (f *fakeVel) HitIP(context.Context, string, string, time.Time, time.Duration) (int64, error) {
 	f.hits++
+	f.ipHits++
 	return f.ip, f.err
 }
 
@@ -68,6 +72,29 @@ func TestScoreUsesReturnedCounts(t *testing.T) {
 	}
 	if res.Decision != payment.DecisionDecline {
 		t.Fatalf("want DECLINE (velocity + dispute), got %s/%d", res.Decision, res.Score)
+	}
+}
+
+func TestScoreCountsAtArrivalTime(t *testing.T) {
+	v, h := &fakeVel{}, &fakeHist{}
+	at := time.Unix(1_800_000_000, 0)
+	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{TxnID: "t", CardID: "c", Timestamp: at}); err != nil {
+		t.Fatal(err)
+	}
+	if !v.at.Equal(at) {
+		t.Fatalf("counted at %v, want %v", v.at, at)
+	}
+}
+
+// Payments without an IP must not all land in one shared "empty IP" counter.
+func TestScoreSkipsIPVelocityWithoutIP(t *testing.T) {
+	v, h := &fakeVel{ip: 999}, &fakeHist{}
+	res, err := newSvc(v, h).Score(context.Background(), payment.Payment{TxnID: "t", CardID: "c", Amount: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.ipHits != 0 || res.Decision != payment.DecisionAllow {
+		t.Fatalf("ipHits=%d decision=%s", v.ipHits, res.Decision)
 	}
 }
 

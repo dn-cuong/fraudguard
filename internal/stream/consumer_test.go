@@ -3,7 +3,9 @@ package stream
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
@@ -83,6 +85,44 @@ func TestProcessStopsOnShutdown(t *testing.T) {
 	cancel()
 	if c.process(ctx, payment.Payment{TxnID: "t"}) || f.calls != 0 {
 		t.Fatal("cancelled ctx must not score or report a result")
+	}
+}
+
+func TestProcessBatchIgnoresClientTimestamp(t *testing.T) {
+	c := &Consumer{jobs: make(chan job, 1)}
+	arrival := time.Unix(1_800_000_000, 0)
+	go func() {
+		j := <-c.jobs
+		if !j.p.Timestamp.Equal(arrival) {
+			t.Errorf("got %v, want arrival %v", j.p.Timestamp, arrival)
+		}
+		j.batch.wg.Done()
+	}()
+	c.processBatch(context.Background(), "s", []types.Record{{
+		Data:                        []byte(`{"txn_id":"t","card_id":"c","timestamp":"2001-01-01T00:00:00Z"}`),
+		ApproximateArrivalTimestamp: &arrival,
+	}})
+}
+
+// A reader rebalance gave up is no longer in c.readers but can still be sending
+// on c.jobs, which Run closes right after stopAll.
+func TestStopAllWaitsForDroppedReaders(t *testing.T) {
+	c := &Consumer{readers: map[string]*reader{}}
+	var mu sync.Mutex
+	exited := false
+	c.running.Add(1)
+	go func() {
+		defer c.running.Done()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		exited = true
+		mu.Unlock()
+	}()
+	c.stopAll()
+	mu.Lock()
+	defer mu.Unlock()
+	if !exited {
+		t.Fatal("stopAll returned while a reader was still running")
 	}
 }
 

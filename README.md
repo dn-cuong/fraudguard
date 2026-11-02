@@ -14,7 +14,7 @@ Side project to see what happens when a few scorer replicas share state. Just ru
 
 A single scorer can't take bursts, and if each replica counts velocity in its own memory they stop agreeing with each other. So the workers keep nothing locally. Counters are in Redis, history in DynamoDB, and the rules only look at `(payment, snapshot)`.
 
-Kinesis partition key is `card_id`, so one card always lands on the same shard and stays in order. Downside: a very busy card sits on one shard. Haven't tried it.
+Kinesis partition key is `card_id`, so one card always lands on the same shard. The pool scores a batch concurrently, so txns can be scored slightly out of order; the velocity counts allow for that (see Rules). Downside: a very busy card sits on one shard. Haven't tried it.
 
 ---
 
@@ -26,7 +26,7 @@ Kinesis partition key is `card_id`, so one card always lands on the same shard a
 2. **API Gateway → Kinesis** (`PutRecord`). Same `card_id` stays on one partition for ordering; different cards fan out across shards.
 3. **EC2 Go workers** poll shards and score through a goroutine pool + channel.
 4. **Shared state before decide**
-   - Redis / ElastiCache: velocity windows (`vel:card:*`, `vel:ip:*`)
+   - Redis / ElastiCache: velocity windows (`win:card:*`, `win:ip:*`)
    - DynamoDB: durable history / dispute lookup
 5. **Rule engine** produces ALLOW / REVIEW / DECLINE and writes the txn record.
 6. **Client polls** `GET /payments/{txn_id}`
@@ -60,7 +60,7 @@ Shards are shared between workers through leases in a small DynamoDB table (`int
 
 - A batch is checkpointed only after every record in it has a result. A crash replays the batch; scoring is idempotent (Redis counts by `txn_id`, DynamoDB `Put` ignores a txn that's already stored), so replays are safe.
 - Workers start from the oldest record when a shard has no checkpoint, so payments that arrived before any worker was up still get scored.
-- After a reshard, a child shard starts only once its parent is fully read, so a card's events stay in order.
+- After a reshard, a child shard starts only once its parent is fully read, so a card's newer events never get ahead of its older ones.
 - A failing score is retried 3 times. If it still fails, an `ERROR` record is stored and the client sees `failed`. If even that can't be stored, the batch isn't checkpointed and gets read again.
 
 ---
@@ -82,9 +82,11 @@ curl -s -X POST http://localhost:8080/v1/payments/TXN_ID/dispute \
   -d '{"card_id":"card-1"}'
 ```
 
-Each txn is counted in Redis with one atomic Lua call (INCR + TTL + a per-txn marker), and the count it gets back is what the rules see. So concurrent payments on one card each get a different count, and a redelivered record isn't counted twice.
+Each txn is counted in Redis with one atomic Lua call on a sorted set of txn_ids, and the count it gets back is what the rules see. So concurrent payments on one card each get a different count, and a redelivered record isn't counted twice.
 
-Score stack: ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over `(payment, snapshot)` so any worker with the same snapshot scores the same way.
+Windows run on arrival time (Kinesis arrival, or the ingest clock in score mode), not the time of scoring, so draining a backlog after an outage doesn't look like a burst. Client-supplied timestamps are ignored: they would let a caller dodge the velocity rules. Txns up to 1s apart still count each other when scored out of order. Payments without an `ip` skip `VELOCITY_IP`.
+
+Score stack: each rule adds its weight (`weight_*` in the config), ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over `(payment, snapshot)` so any worker with the same snapshot scores the same way.
 
 ---
 
@@ -171,23 +173,21 @@ Against LocalStack Kinesis + DynamoDB Local, with `bin/ingest -mode kinesis` and
 - Redis stopped: payments came back `failed` with the error, and scoring worked again once Redis was back.
 - SIGTERM: the worker hands its shards back, so the next worker takes them right away instead of waiting for the lease.
 
------------|----------|--------|-----|-----|
-| 1000 | 996 | 0 | 1.3 ms | 81 ms |
-
-That's one run, and it doesn't include Kinesis or API Gateway, so it says nothing about the AWS latency.
-
 ---
 
 ## Known limitations
 
 - Not tested on real AWS yet, only Terraform validate plus the LocalStack run above.
 - Lease expiry uses each worker's own clock, so hosts need roughly synced time (chrony on the AL2023 AMI does this). The 30s lease is far above normal skew.
-- Deliveries are at-least-once. A txn that's replayed after its Redis entry has left the window gets counted again, which only matters if a worker is down for longer than the window.
+- Deliveries are at-least-once. A replayed txn is counted at its original arrival time, so it can't inflate the current window.
+- A backlog that drains slower than real time can undercount: a card's Redis key expires on wall-clock time, so it can vanish between two of that card's txns.
 - The sliding window keeps one Redis entry per txn in the window, so a card or IP sending thousands of txns a minute costs memory until they age out.
 - If the DynamoDB write of a scored txn fails, the txn is retried and finally stored as `ERROR`, but its Redis counts stay.
 - USD only. Anything else is rejected, there's no FX.
 - Dispute lookup goes through a GSI, so a dispute shows up a moment after it's marked. Txns disputed before the `dispute-index` existed aren't in it.
 - SSH ingress is open by default, see Safety.
+- The AWS API has no auth, and the dispute endpoint exists only on the local ingest binary, so `HISTORY_DISPUTE` can't fire on AWS yet.
+- The heartbeat alarms have no `alarm_actions`: they change state but notify and replace nothing.
 
 ---
 

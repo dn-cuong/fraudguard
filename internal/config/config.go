@@ -35,6 +35,10 @@ type RulesYAML struct {
 	VelocityIPWindow   string  `yaml:"velocity_ip_window"`
 	DeclineScore       int     `yaml:"decline_score"`
 	ReviewScore        int     `yaml:"review_score"`
+	WeightAmountHigh   int     `yaml:"weight_amount_high"`
+	WeightVelocityCard int     `yaml:"weight_velocity_card"`
+	WeightVelocityIP   int     `yaml:"weight_velocity_ip"`
+	WeightDispute      int     `yaml:"weight_dispute"`
 }
 
 type KinesisYAML struct {
@@ -78,6 +82,10 @@ func Default() Config {
 			VelocityIPWindow:   "1m",
 			DeclineScore:       80,
 			ReviewScore:        40,
+			WeightAmountHigh:   40,
+			WeightVelocityCard: 50,
+			WeightVelocityIP:   30,
+			WeightDispute:      60,
 		},
 		Kinesis: KinesisYAML{
 			StreamName: envOr("KINESIS_STREAM", "fraudguard-payments"),
@@ -108,6 +116,10 @@ func (c Config) EngineConfig() (engine.Config, error) {
 		VelocityIPWindow:   ipWin,
 		DeclineScore:       c.Rules.DeclineScore,
 		ReviewScore:        c.Rules.ReviewScore,
+		WeightAmountHigh:   c.Rules.WeightAmountHigh,
+		WeightVelocityCard: c.Rules.WeightVelocityCard,
+		WeightVelocityIP:   c.Rules.WeightVelocityIP,
+		WeightDispute:      c.Rules.WeightDispute,
 	}, nil
 }
 

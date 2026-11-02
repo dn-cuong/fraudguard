@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dn-cuong/fraudguard/internal/engine"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -45,5 +47,11 @@ worker_name: "fraudguard-worker-0"
 	}
 	if eng.VelocityCardWindow.String() != "1m0s" {
 		t.Fatalf("unexpected card window %v", eng.VelocityCardWindow)
+	}
+	// weights aren't in this file, so an older config keeps the defaults
+	def := engine.DefaultConfig()
+	if eng.WeightAmountHigh != def.WeightAmountHigh || eng.WeightVelocityCard != def.WeightVelocityCard ||
+		eng.WeightVelocityIP != def.WeightVelocityIP || eng.WeightDispute != def.WeightDispute {
+		t.Fatalf("weights changed: %+v", eng)
 	}
 }

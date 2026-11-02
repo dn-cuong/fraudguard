@@ -15,6 +15,10 @@ type Config struct {
 	VelocityIPWindow   time.Duration
 	DeclineScore       int
 	ReviewScore        int
+	WeightAmountHigh   int
+	WeightVelocityCard int
+	WeightVelocityIP   int
+	WeightDispute      int
 }
 
 func DefaultConfig() Config {
@@ -26,6 +30,10 @@ func DefaultConfig() Config {
 		VelocityIPWindow:   time.Minute,
 		DeclineScore:       80,
 		ReviewScore:        40,
+		WeightAmountHigh:   40,
+		WeightVelocityCard: 50,
+		WeightVelocityIP:   30,
+		WeightDispute:      60,
 	}
 }
 
@@ -51,7 +59,7 @@ func (e *Engine) Evaluate(p payment.Payment, snap Snapshot) payment.ScoreResult 
 	score := 0
 
 	if p.Amount >= e.cfg.AmountHighUSD {
-		score += 40
+		score += e.cfg.WeightAmountHigh
 		triggered = append(triggered, payment.TriggeredRule{
 			ID:      "AMOUNT_HIGH",
 			Message: fmt.Sprintf("amount %.2f >= %.2f", p.Amount, e.cfg.AmountHighUSD),
@@ -59,7 +67,7 @@ func (e *Engine) Evaluate(p payment.Payment, snap Snapshot) payment.ScoreResult 
 	}
 
 	if snap.CardCount > e.cfg.VelocityCardLimit {
-		score += 50
+		score += e.cfg.WeightVelocityCard
 		triggered = append(triggered, payment.TriggeredRule{
 			ID:      "VELOCITY_CARD",
 			Message: fmt.Sprintf("card %s has %d txns in window (limit %d)", p.CardID, snap.CardCount, e.cfg.VelocityCardLimit),
@@ -67,7 +75,7 @@ func (e *Engine) Evaluate(p payment.Payment, snap Snapshot) payment.ScoreResult 
 	}
 
 	if snap.IPCount > e.cfg.VelocityIPLimit {
-		score += 30
+		score += e.cfg.WeightVelocityIP
 		triggered = append(triggered, payment.TriggeredRule{
 			ID:      "VELOCITY_IP",
 			Message: fmt.Sprintf("ip %s has %d txns in window (limit %d)", p.IP, snap.IPCount, e.cfg.VelocityIPLimit),
@@ -75,7 +83,7 @@ func (e *Engine) Evaluate(p payment.Payment, snap Snapshot) payment.ScoreResult 
 	}
 
 	if snap.HadDispute {
-		score += 60
+		score += e.cfg.WeightDispute
 		triggered = append(triggered, payment.TriggeredRule{
 			ID:      "HISTORY_DISPUTE",
 			Message: fmt.Sprintf("card %s has prior dispute/fraud history", p.CardID),

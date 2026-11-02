@@ -20,5 +20,9 @@ rules:
   velocity_ip_window: "1m"
   decline_score: 80
   review_score: 40
+  weight_amount_high: 40
+  weight_velocity_card: 50
+  weight_velocity_ip: 30
+  weight_dispute: 60
 worker_count: 32
 worker_name: "local-ingest"
