@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -20,6 +21,8 @@ import (
 	"github.com/dn-cuong/fraudguard/internal/velocity"
 	"github.com/google/uuid"
 )
+
+const maxBodyBytes = 64 << 10
 
 func main() {
 	cfgPath := flag.String("config", "config/local.yaml", "config file")
@@ -56,6 +59,39 @@ func main() {
 		svc = scorer.New(engine.New(engCfg), vel, hist, engCfg)
 	}
 
+	srv := newServer(cfg.HTTPAddr, routes(cfg.Kinesis.StreamName, hist, svc, producer))
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("shutdown", "err", err)
+		}
+	}()
+
+	slog.Info("ingest listening", "addr", cfg.HTTPAddr, "mode", *mode)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("serve", "err", err)
+		os.Exit(1)
+	}
+	// ListenAndServe returns as soon as Shutdown starts; wait for it to drain
+	<-shutdownDone
+}
+
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+func routes(streamName string, hist *history.Store, svc *scorer.Service, producer *stream.Producer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -64,44 +100,39 @@ func main() {
 
 	mux.HandleFunc("POST /v1/payments", func(w http.ResponseWriter, r *http.Request) {
 		var p payment.Payment
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+		if !decodeBody(w, r, &p) {
 			return
 		}
 		if p.TxnID == "" {
 			p.TxnID = uuid.NewString()
 		}
-		if p.CardID == "" || p.Amount <= 0 {
-			http.Error(w, "card_id and amount required", http.StatusBadRequest)
+		if err := p.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if p.Currency == "" {
 			p.Currency = "USD"
-		}
-		if p.Currency != "USD" {
-			http.Error(w, scorer.ErrUnsupportedCurrency.Error(), http.StatusBadRequest)
-			return
 		}
 		// velocity windows run on this, so it can't be a client-supplied value
 		p.Timestamp = time.Now().UTC()
 
 		if producer != nil {
 			if err := producer.Put(r.Context(), p); err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
+				serverError(w, "queue payment", err, http.StatusBadGateway)
 				return
 			}
 			writeJSON(w, http.StatusAccepted, map[string]any{
 				"status": "queued",
 				"txn_id": p.TxnID,
 				"poll":   "/v1/payments/" + p.TxnID,
-				"stream": cfg.Kinesis.StreamName,
+				"stream": streamName,
 			})
 			return
 		}
 
 		res, err := svc.Score(r.Context(), p)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			serverError(w, "score payment", err, http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, res)
@@ -115,7 +146,7 @@ func main() {
 		}
 		rec, err := hist.GetByTxnID(r.Context(), txnID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			serverError(w, "read payment", err, http.StatusInternalServerError)
 			return
 		}
 		if rec == nil {
@@ -156,12 +187,20 @@ func main() {
 		var body struct {
 			CardID string `json:"card_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CardID == "" {
+		if !decodeBody(w, r, &body) {
+			return
+		}
+		if body.CardID == "" {
 			http.Error(w, "card_id required", http.StatusBadRequest)
 			return
 		}
-		if err := hist.MarkDisputed(r.Context(), body.CardID, txnID); err != nil {
+		err := hist.MarkDisputed(r.Context(), body.CardID, txnID)
+		if errors.Is(err, history.ErrNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			serverError(w, "mark dispute", err, http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -170,20 +209,29 @@ func main() {
 			"card_id": body.CardID,
 		})
 	})
+	return mux
+}
 
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
-		defer c()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-
-	slog.Info("ingest listening", "addr", cfg.HTTPAddr, "mode", *mode)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("serve", "err", err)
-		os.Exit(1)
+// decodeBody reads a size-limited JSON body and answers the request itself when
+// it can't. Real payment bodies are a few hundred bytes.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(v)
+	var tooBig *http.MaxBytesError
+	switch {
+	case err == nil:
+		return true
+	case errors.As(err, &tooBig):
+		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+	default:
+		http.Error(w, "invalid json", http.StatusBadRequest)
 	}
+	return false
+}
+
+// serverError logs the cause and keeps internals out of the response.
+func serverError(w http.ResponseWriter, what string, err error, code int) {
+	slog.Error(what, "err", err)
+	http.Error(w, http.StatusText(code), code)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

@@ -26,6 +26,9 @@ type Config struct {
 
 const disputeIndex = "dispute-index"
 
+// ErrNotFound means the txn doesn't exist on that card.
+var ErrNotFound = errors.New("transaction not found")
+
 // Store persists scored transactions in DynamoDB.
 type Store struct {
 	client    *dynamodb.Client
@@ -176,6 +179,10 @@ func (s *Store) MarkDisputed(ctx context.Context, cardID, txnID string) error {
 			":c": &types.AttributeValueMemberS{Value: cardID},
 		},
 	})
+	var missing *types.ConditionalCheckFailedException
+	if errors.As(err, &missing) {
+		return ErrNotFound
+	}
 	return err
 }
 

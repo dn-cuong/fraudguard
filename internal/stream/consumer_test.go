@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/dn-cuong/fraudguard/internal/lease"
 	"github.com/dn-cuong/fraudguard/internal/payment"
-	"github.com/dn-cuong/fraudguard/internal/scorer"
 )
 
 type fakeScorer struct {
@@ -60,7 +59,7 @@ func TestProcessGivesUpWithAnErrorRecord(t *testing.T) {
 }
 
 func TestProcessDoesNotRetryPermanentErrors(t *testing.T) {
-	f := &fakeScorer{scoreErrs: []error{scorer.ErrUnsupportedCurrency}}
+	f := &fakeScorer{scoreErrs: []error{payment.ErrInvalid}}
 	c := &Consumer{scorer: f}
 	c.process(context.Background(), payment.Payment{TxnID: "t"})
 	if f.calls != 1 || len(f.failed) != 1 {

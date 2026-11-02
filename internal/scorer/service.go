@@ -2,7 +2,6 @@ package scorer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -20,10 +19,6 @@ type historyStore interface {
 	Put(ctx context.Context, rec payment.Record) error
 }
 
-// ErrUnsupportedCurrency is returned for anything but USD. The amount rule
-// compares against a USD threshold and there is no FX conversion.
-var ErrUnsupportedCurrency = errors.New("only USD is supported")
-
 // Service scores one payment. Counters are hit first (atomic, per-txn
 // idempotent) and the returned counts feed the rules, so concurrent payments
 // on the same card each see a distinct count.
@@ -40,15 +35,15 @@ func New(eng *engine.Engine, vel velocityStore, hist historyStore, cfg engine.Co
 
 func (s *Service) Score(ctx context.Context, p payment.Payment) (payment.ScoreResult, error) {
 	start := time.Now()
+	// API Gateway only checks the shape, so this is the real boundary on AWS
+	if err := p.Validate(); err != nil {
+		return payment.ScoreResult{}, err
+	}
 	if p.Timestamp.IsZero() {
 		p.Timestamp = time.Now().UTC()
 	}
 	if p.Currency == "" {
 		p.Currency = "USD"
-	}
-
-	if p.Currency != "USD" {
-		return payment.ScoreResult{}, ErrUnsupportedCurrency
 	}
 
 	cardCount, err := s.vel.HitCard(ctx, p.CardID, p.TxnID, p.Timestamp, s.cfg.VelocityCardWindow)

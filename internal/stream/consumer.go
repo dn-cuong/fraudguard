@@ -14,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/dn-cuong/fraudguard/internal/lease"
 	"github.com/dn-cuong/fraudguard/internal/payment"
-	"github.com/dn-cuong/fraudguard/internal/scorer"
 )
 
 // Scorer is what the consumer needs from the scoring service.
@@ -439,7 +438,7 @@ func (c *Consumer) process(ctx context.Context, p payment.Payment) bool {
 			c.latSumUs.Add(time.Since(start).Microseconds())
 			return true
 		}
-		if errors.Is(err, scorer.ErrUnsupportedCurrency) {
+		if errors.Is(err, payment.ErrInvalid) {
 			break // retrying won't change the answer
 		}
 		slog.Warn("score failed", "txn_id", p.TxnID, "attempt", attempt+1, "err", err)
