@@ -1,13 +1,10 @@
-.PHONY: tidy up down build test ingest loadgen smoke
+.PHONY: tidy up down build test ingest loadgen smoke stack stack-smoke
 
 tidy:
 	go mod tidy
 
 up:
 	docker compose up -d redis dynamodb
-
-down:
-	docker compose down
 
 build:
 	mkdir -p bin
@@ -26,3 +23,14 @@ loadgen: build
 
 smoke:
 	bash scripts/smoke.sh
+
+# whole pipeline in containers: ingest (kinesis mode) -> LocalStack -> worker
+stack:
+	docker compose --profile full up -d --build
+
+stack-smoke: stack
+	until curl -sf localhost:8080/healthz >/dev/null; do sleep 1; done
+	TRIES=150 bash scripts/smoke.sh
+
+down:
+	docker compose --profile full down

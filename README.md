@@ -116,6 +116,14 @@ make build
 ./bin/ingest -config config/local.yaml -mode score
 ```
 
+Or run the whole pipeline in containers (ingest in Kinesis mode → LocalStack → worker → DynamoDB Local), the same path as AWS:
+
+```bash
+make stack          # docker compose --profile full up -d --build
+make stack-smoke    # POST a payment and poll until a worker has scored it
+make down
+```
+
 Normal payment (`ALLOW`):
 
 ```bash

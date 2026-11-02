@@ -1,0 +1,17 @@
+# Used by the docker compose "full" profile: every service by its compose name.
+redis_addr: "redis:6379"
+
+dynamo:
+  region: "us-east-1"
+  table_name: "fraudguard-transactions"
+  endpoint: "http://dynamodb:8000"
+
+kinesis:
+  stream_name: "fraudguard-payments"
+  region: "us-east-1"
+  endpoint: "http://localstack:4566"
+
+http_addr: ":8080"
+worker_count: 32
+worker_name: "compose-worker"
+lease_table: "fraudguard-leases"
