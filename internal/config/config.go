@@ -19,6 +19,8 @@ type Config struct {
 	WorkerCount int         `yaml:"worker_count"`
 	WorkerName  string      `yaml:"worker_name"`
 	LeaseTable  string      `yaml:"lease_table"`
+	// DeadLetterTable holds records the worker could not score.
+	DeadLetterTable string `yaml:"dead_letter_table"`
 }
 
 type DynamoYAML struct {
@@ -92,10 +94,11 @@ func Default() Config {
 			Region:     envOr("AWS_REGION", "us-east-1"),
 			Endpoint:   os.Getenv("KINESIS_ENDPOINT"),
 		},
-		HTTPAddr:    envOr("HTTP_ADDR", ":8080"),
-		WorkerCount: 32,
-		WorkerName:  envOr("WORKER_NAME", "fraudguard-worker-0"),
-		LeaseTable:  envOr("LEASE_TABLE", "fraudguard-leases"),
+		HTTPAddr:        envOr("HTTP_ADDR", ":8080"),
+		WorkerCount:     32,
+		WorkerName:      envOr("WORKER_NAME", "fraudguard-worker-0"),
+		LeaseTable:      envOr("LEASE_TABLE", "fraudguard-leases"),
+		DeadLetterTable: envOr("DEAD_LETTER_TABLE", "fraudguard-dead-letters"),
 	}
 }
 

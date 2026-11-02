@@ -22,6 +22,11 @@ type Scorer interface {
 	RecordFailure(ctx context.Context, p payment.Payment, cause error) error
 }
 
+// DeadLetters keeps records that could not be scored.
+type DeadLetters interface {
+	Put(ctx context.Context, shardID, seq string, data []byte, cause error) error
+}
+
 const (
 	tickEvery   = 5 * time.Second
 	maxAttempts = 3
@@ -43,6 +48,7 @@ type Consumer struct {
 	pool       int
 	leases     *lease.Store
 	scorer     Scorer
+	dead       DeadLetters
 
 	jobs     chan job
 	mu       sync.Mutex
@@ -51,6 +57,7 @@ type Consumer struct {
 	scored   atomic.Int64
 	errors   atomic.Int64
 	latSumUs atomic.Int64
+	deadN    atomic.Int64
 }
 
 type reader struct {
@@ -62,6 +69,9 @@ type job struct {
 	ctx   context.Context
 	p     payment.Payment
 	batch *batch
+	// where the record came from, for the dead letter
+	shardID, seq string
+	data         []byte
 }
 
 // batch tracks one GetRecords result while the pool works on it.
@@ -71,7 +81,7 @@ type batch struct {
 }
 
 // NewConsumer builds a consumer. owner must be unique per process.
-func NewConsumer(client *kinesis.Client, streamName, owner string, pool int, leases *lease.Store, s Scorer) *Consumer {
+func NewConsumer(client *kinesis.Client, streamName, owner string, pool int, leases *lease.Store, s Scorer, dead DeadLetters) *Consumer {
 	if pool < 1 {
 		pool = 8
 	}
@@ -82,6 +92,7 @@ func NewConsumer(client *kinesis.Client, streamName, owner string, pool int, lea
 		pool:       pool,
 		leases:     leases,
 		scorer:     s,
+		dead:       dead,
 		jobs:       make(chan job, pool*4),
 		readers:    map[string]*reader{},
 	}
@@ -94,6 +105,9 @@ func (c *Consumer) Stats() (scored, errs int64, avgMs float64) {
 	}
 	return n, c.errors.Load(), float64(c.latSumUs.Load()) / float64(n) / 1000.0
 }
+
+// DeadLettered is how many records went to the dead letter table.
+func (c *Consumer) DeadLettered() int64 { return c.deadN.Load() }
 
 // Owned is how many shards this worker is reading right now.
 func (c *Consumer) Owned() int {
@@ -110,7 +124,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 		go func() {
 			defer pool.Done()
 			for j := range c.jobs {
-				if !c.process(j.ctx, j.p) {
+				if !c.process(j) {
 					j.batch.unresolved.Add(1)
 				}
 				j.batch.wg.Done()
@@ -389,24 +403,30 @@ func (c *Consumer) readFrom(ctx context.Context, shardID string, iter *string, c
 }
 
 // processBatch scores a batch on the pool and reports whether every record got
-// a result. Unparseable records can't be recorded (no txn_id/card_id), so they
-// are counted and skipped.
+// a result. Unparseable records can't be recorded for the client (no
+// txn_id/card_id), so they go straight to the dead letter table.
 func (c *Consumer) processBatch(ctx context.Context, shardID string, recs []types.Record) bool {
 	b := &batch{}
 	sent := true
 	for _, rec := range recs {
+		seq := aws.ToString(rec.SequenceNumber)
 		var p payment.Payment
 		if err := json.Unmarshal(rec.Data, &p); err != nil || p.TxnID == "" || p.CardID == "" {
 			// Ingest always sets these, so this is malformed input.
 			c.errors.Add(1)
-			slog.Error("bad record skipped", "shard", shardID, "seq", aws.ToString(rec.SequenceNumber))
+			if err == nil {
+				err = errors.New("record has no txn_id or card_id")
+			}
+			if !c.deadLetter(ctx, shardID, seq, rec.Data, err) {
+				b.unresolved.Add(1)
+			}
 			continue
 		}
 		// velocity windows run on this, so it can't be a client-supplied value
 		p.Timestamp = aws.ToTime(rec.ApproximateArrivalTimestamp).UTC()
 		b.wg.Add(1)
 		select {
-		case c.jobs <- job{ctx: ctx, p: p, batch: b}:
+		case c.jobs <- job{ctx: ctx, p: p, batch: b, shardID: shardID, seq: seq, data: rec.Data}:
 		case <-ctx.Done():
 			b.wg.Done()
 			sent = false
@@ -420,10 +440,11 @@ func (c *Consumer) processBatch(ctx context.Context, shardID string, recs []type
 }
 
 // process scores one payment with a few retries. A payment that still can't be
-// scored gets an ERROR record instead. It returns false only when there is no
-// result at all (shutdown, or even the ERROR record could not be written), and
-// then the batch is not checkpointed.
-func (c *Consumer) process(ctx context.Context, p payment.Payment) bool {
+// scored gets an ERROR record, so the client sees "failed", and a dead letter.
+// It returns false only when there is no result at all (shutdown, or either
+// write failed), and then the batch is not checkpointed.
+func (c *Consumer) process(j job) bool {
+	ctx, p := j.ctx, j.p
 	start := time.Now()
 	var err error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -452,6 +473,18 @@ func (c *Consumer) process(ctx context.Context, p payment.Payment) bool {
 		slog.Error("could not record failure", "txn_id", p.TxnID, "err", ferr)
 		return false
 	}
+	return c.deadLetter(ctx, j.shardID, j.seq, j.data, err)
+}
+
+// deadLetter stores a record that won't be scored. False means it couldn't be
+// stored, so the batch must not be checkpointed or the record is lost.
+func (c *Consumer) deadLetter(ctx context.Context, shardID, seq string, data []byte, cause error) bool {
+	if err := c.dead.Put(ctx, shardID, seq, data, cause); err != nil {
+		slog.Error("dead letter write failed", "shard", shardID, "seq", seq, "err", err)
+		return false
+	}
+	c.deadN.Add(1)
+	slog.Warn("record dead-lettered", "shard", shardID, "seq", seq, "cause", cause)
 	return true
 }
 
