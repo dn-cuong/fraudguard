@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,5 +75,30 @@ func TestPutSetsTTLAndDisputeClearsIt(t *testing.T) {
 	}
 	if got, _ := s.GetByTxnID(ctx, "keep"); got == nil || got.ExpiresAt != 0 {
 		t.Fatalf("disputed txn would still expire: %+v", got)
+	}
+}
+
+// Ingest and worker start together and both create the table. The one that
+// loses the race used to exit on ResourceInUseException.
+func TestEnsureTableConcurrently(t *testing.T) {
+	ep := os.Getenv("DYNAMO_TEST_ENDPOINT")
+	if ep == "" {
+		t.Skip("DYNAMO_TEST_ENDPOINT not set")
+	}
+	name := "txns-" + uuid.NewString()
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = New(Config{Region: "us-east-1", Endpoint: ep, TableName: name}).EnsureTable(context.Background())
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: %v", i, err)
+		}
 	}
 }
