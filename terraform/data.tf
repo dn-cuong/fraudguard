@@ -35,6 +35,12 @@ resource "aws_dynamodb_table" "transactions" {
     projection_type = "ALL"
   }
 
+  # 90 days, set by the worker; disputed txns have no expires_at and stay
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
   # sparse: only disputed txns have dispute_card_id
   global_secondary_index {
     name            = "dispute-index"
@@ -52,6 +58,29 @@ resource "aws_dynamodb_table" "leases" {
   attribute {
     name = "shard_id"
     type = "S"
+  }
+}
+
+# records the worker could not score (internal/deadletter)
+resource "aws_dynamodb_table" "dead_letters" {
+  name         = "${var.project}-dead-letters"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "shard_id"
+  range_key    = "seq"
+
+  attribute {
+    name = "shard_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "seq"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
   }
 }
 

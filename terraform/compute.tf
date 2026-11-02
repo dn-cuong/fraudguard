@@ -68,6 +68,11 @@ resource "aws_iam_role_policy" "worker" {
       },
       {
         Effect   = "Allow"
+        Action   = ["dynamodb:PutItem", "dynamodb:DescribeTable"]
+        Resource = aws_dynamodb_table.dead_letters.arn
+      },
+      {
+        Effect   = "Allow"
         Action   = ["cloudwatch:PutMetricData"]
         Resource = "*"
       }

@@ -36,10 +36,27 @@ func (f *fakeScorer) RecordFailure(_ context.Context, _ payment.Payment, cause e
 
 var errBoom = errors.New("redis down")
 
+type fakeDead struct {
+	puts []string // seq of each dead letter
+	err  error
+}
+
+func (f *fakeDead) Put(_ context.Context, _, seq string, _ []byte, _ error) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.puts = append(f.puts, seq)
+	return nil
+}
+
+func one(ctx context.Context, txn string) job {
+	return job{ctx: ctx, p: payment.Payment{TxnID: txn}, seq: "1"}
+}
+
 func TestProcessRetriesThenSucceeds(t *testing.T) {
 	f := &fakeScorer{scoreErrs: []error{errBoom, errBoom}}
-	c := &Consumer{scorer: f}
-	if !c.process(context.Background(), payment.Payment{TxnID: "t"}) {
+	c := &Consumer{scorer: f, dead: &fakeDead{}}
+	if !c.process(one(context.Background(), "t")) {
 		t.Fatal("want resolved")
 	}
 	if f.calls != 3 || len(f.failed) != 0 {
@@ -49,8 +66,8 @@ func TestProcessRetriesThenSucceeds(t *testing.T) {
 
 func TestProcessGivesUpWithAnErrorRecord(t *testing.T) {
 	f := &fakeScorer{scoreErrs: []error{errBoom, errBoom, errBoom, errBoom}}
-	c := &Consumer{scorer: f}
-	if !c.process(context.Background(), payment.Payment{TxnID: "t"}) {
+	c := &Consumer{scorer: f, dead: &fakeDead{}}
+	if !c.process(one(context.Background(), "t")) {
 		t.Fatal("an ERROR record counts as a result")
 	}
 	if f.calls != maxAttempts || len(f.failed) != 1 {
@@ -60,8 +77,8 @@ func TestProcessGivesUpWithAnErrorRecord(t *testing.T) {
 
 func TestProcessDoesNotRetryPermanentErrors(t *testing.T) {
 	f := &fakeScorer{scoreErrs: []error{payment.ErrInvalid}}
-	c := &Consumer{scorer: f}
-	c.process(context.Background(), payment.Payment{TxnID: "t"})
+	c := &Consumer{scorer: f, dead: &fakeDead{}}
+	c.process(one(context.Background(), "t"))
 	if f.calls != 1 || len(f.failed) != 1 {
 		t.Fatalf("calls=%d failed=%v", f.calls, f.failed)
 	}
@@ -71,24 +88,24 @@ func TestProcessDoesNotRetryPermanentErrors(t *testing.T) {
 // checkpointed, so the txn is read again later.
 func TestProcessUnresolvedWhenFailureCannotBeStored(t *testing.T) {
 	f := &fakeScorer{scoreErrs: []error{errBoom, errBoom, errBoom}, failureErr: errBoom}
-	c := &Consumer{scorer: f}
-	if c.process(context.Background(), payment.Payment{TxnID: "t"}) {
+	c := &Consumer{scorer: f, dead: &fakeDead{}}
+	if c.process(one(context.Background(), "t")) {
 		t.Fatal("want unresolved")
 	}
 }
 
 func TestProcessStopsOnShutdown(t *testing.T) {
 	f := &fakeScorer{}
-	c := &Consumer{scorer: f}
+	c := &Consumer{scorer: f, dead: &fakeDead{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if c.process(ctx, payment.Payment{TxnID: "t"}) || f.calls != 0 {
+	if c.process(one(ctx, "t")) || f.calls != 0 {
 		t.Fatal("cancelled ctx must not score or report a result")
 	}
 }
 
 func TestProcessBatchIgnoresClientTimestamp(t *testing.T) {
-	c := &Consumer{jobs: make(chan job, 1)}
+	c := &Consumer{jobs: make(chan job, 1), dead: &fakeDead{}}
 	arrival := time.Unix(1_800_000_000, 0)
 	go func() {
 		j := <-c.jobs
@@ -101,6 +118,39 @@ func TestProcessBatchIgnoresClientTimestamp(t *testing.T) {
 		Data:                        []byte(`{"txn_id":"t","card_id":"c","timestamp":"2001-01-01T00:00:00Z"}`),
 		ApproximateArrivalTimestamp: &arrival,
 	}})
+}
+
+func TestPoisonRecordIsDeadLetteredNotDropped(t *testing.T) {
+	d := &fakeDead{}
+	c := &Consumer{dead: d}
+	recs := []types.Record{{Data: []byte("{not json"), SequenceNumber: aws.String("7")}}
+	if !c.processBatch(context.Background(), "s", recs) {
+		t.Fatal("a dead-lettered record counts as handled, so the shard moves on")
+	}
+	if len(d.puts) != 1 || d.puts[0] != "7" || c.DeadLettered() != 1 {
+		t.Fatalf("dead letters: %v", d.puts)
+	}
+}
+
+// If the dead letter can't be written, the batch is read again rather than lost.
+func TestPoisonRecordBlocksCheckpointWhenDeadLetterFails(t *testing.T) {
+	c := &Consumer{dead: &fakeDead{err: errBoom}}
+	recs := []types.Record{{Data: []byte("{not json"), SequenceNumber: aws.String("7")}}
+	if c.processBatch(context.Background(), "s", recs) {
+		t.Fatal("want unresolved")
+	}
+}
+
+func TestGivenUpPaymentIsDeadLettered(t *testing.T) {
+	d := &fakeDead{}
+	c := &Consumer{scorer: &fakeScorer{scoreErrs: []error{errBoom, errBoom, errBoom}}, dead: d}
+	if !c.process(one(context.Background(), "t")) || len(d.puts) != 1 {
+		t.Fatalf("dead letters: %v", d.puts)
+	}
+	c = &Consumer{scorer: &fakeScorer{scoreErrs: []error{errBoom, errBoom, errBoom}}, dead: &fakeDead{err: errBoom}}
+	if c.process(one(context.Background(), "t")) {
+		t.Fatal("unstored dead letter must leave the batch unresolved")
+	}
 }
 
 // A reader rebalance gave up is no longer in c.readers but can still be sending

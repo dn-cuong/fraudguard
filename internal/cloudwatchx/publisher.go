@@ -29,20 +29,34 @@ func New(ctx context.Context, region, workerName string) *Publisher {
 }
 
 func (p *Publisher) Beat(ctx context.Context) {
+	p.put(ctx, types.MetricDatum{
+		MetricName: aws.String("WorkerHeartbeat"),
+		Dimensions: []types.Dimension{{
+			Name:  aws.String("WorkerName"),
+			Value: aws.String(p.name),
+		}},
+		Value: aws.Float64(1),
+		Unit:  types.StandardUnitCount,
+	})
+}
+
+// DeadLetters reports records dead-lettered since the last call. It has no
+// worker dimension, so one alarm covers every worker.
+func (p *Publisher) DeadLetters(ctx context.Context, n int64) {
+	p.put(ctx, types.MetricDatum{
+		MetricName: aws.String("DeadLetters"),
+		Value:      aws.Float64(float64(n)),
+		Unit:       types.StandardUnitCount,
+	})
+}
+
+func (p *Publisher) put(ctx context.Context, d types.MetricDatum) {
 	if p == nil || p.client == nil {
 		return
 	}
 	_, err := p.client.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
-		Namespace: aws.String("FraudGuard"),
-		MetricData: []types.MetricDatum{{
-			MetricName: aws.String("WorkerHeartbeat"),
-			Dimensions: []types.Dimension{{
-				Name:  aws.String("WorkerName"),
-				Value: aws.String(p.name),
-			}},
-			Value: aws.Float64(1),
-			Unit:  types.StandardUnitCount,
-		}},
+		Namespace:  aws.String("FraudGuard"),
+		MetricData: []types.MetricDatum{d},
 	})
 	if err != nil {
 		slog.Warn("cloudwatch put metric", "err", err)

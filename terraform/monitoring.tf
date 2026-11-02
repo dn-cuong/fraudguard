@@ -16,3 +16,18 @@ resource "aws_cloudwatch_metric_alarm" "worker_heartbeat" {
     WorkerName = "${var.project}-worker-${count.index}"
   }
 }
+
+# Any record that could not be scored. Each one is in the dead letter table
+# with its raw bytes and error.
+resource "aws_cloudwatch_metric_alarm" "dead_letters" {
+  alarm_name          = "${var.project}-dead-letters"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "DeadLetters"
+  namespace           = "FraudGuard"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_description   = "Payments landed in ${aws_dynamodb_table.dead_letters.name}; inspect and replay"
+}

@@ -54,6 +54,10 @@ That only means the event is on the stream. The decision comes from `GET /paymen
 | **ElastiCache Redis** | Hot velocity counters with TTL (sub-ms reads under burst) |
 | **DynamoDB** | Durable txn history + dispute flag (system of record) |
 
+Scored txns expire after 90 days through DynamoDB TTL (`expires_at`). Disputed txns drop their TTL and are kept, so `HISTORY_DISPUTE` doesn't forget a card. TTL deletes are lazy, usually within a couple of days of expiry.
+
+**Key design.** The table is keyed `card_id` + `txn_id`, and polling goes through the `txn_id-index` GSI. Keying on `txn_id` alone would give strongly consistent polls and drop one GSI write, but marking a dispute needs the card as well, and per-card history (the base for any rule beyond velocity) would need its own GSI. So the key stays, at the cost of one extra index write per txn and polls that can lag the write by a moment.
+
 Replicas stay consistent because scoring depends on shared stores, not process-local RAM.
 
 Shards are shared between workers through leases in a small DynamoDB table (`internal/lease`). A worker takes its fair share of shards, renews the lease every few seconds, and if it dies the lease expires (30s) and another worker picks the shard up from the last checkpoint. There's no worker count to keep in sync anywhere, so you can add or remove hosts freely.
@@ -61,7 +65,8 @@ Shards are shared between workers through leases in a small DynamoDB table (`int
 - A batch is checkpointed only after every record in it has a result. A crash replays the batch; scoring is idempotent (Redis counts by `txn_id`, DynamoDB `Put` ignores a txn that's already stored), so replays are safe.
 - Workers start from the oldest record when a shard has no checkpoint, so payments that arrived before any worker was up still get scored.
 - After a reshard, a child shard starts only once its parent is fully read, so a card's newer events never get ahead of its older ones.
-- A failing score is retried 3 times. If it still fails, an `ERROR` record is stored and the client sees `failed`. If even that can't be stored, the batch isn't checkpointed and gets read again.
+- A failing score is retried 3 times. If it still fails, an `ERROR` record is stored, so the client sees `failed`, and the raw record goes to the dead letter table. Records that can't be parsed at all go there too. If either write fails, the batch isn't checkpointed and gets read again.
+- Dead letters are kept 14 days in `fraudguard-dead-letters`, keyed by shard and sequence number, with the error. The `fraudguard-dead-letters` alarm fires on any. Inspect them with `aws dynamodb scan --table-name fraudguard-dead-letters`.
 
 ---
 
@@ -108,7 +113,7 @@ Score stack: each rule adds its weight (`weight_*` in the config), ≥80 `DECLIN
 
 ## Local
 
-Needs Go 1.25+ and Docker Desktop.
+Needs Go 1.26.10+ and Docker Desktop.
 
 ```bash
 docker compose up -d redis dynamodb
@@ -201,7 +206,7 @@ Against LocalStack Kinesis + DynamoDB Local, with `bin/ingest -mode kinesis` and
 
 ## AWS
 
-Provisions API Gateway, Kinesis, ElastiCache, DynamoDB (transactions with `txn_id-index` and `dispute-index`, plus the lease table), EC2 workers, bastion, CloudWatch.
+Provisions API Gateway, Kinesis, ElastiCache, DynamoDB (transactions with `txn_id-index` and `dispute-index`, plus the lease and dead letter tables), EC2 workers, bastion, CloudWatch.
 
 **Cost:** NAT + ElastiCache dominate. Apply → smoke → `terraform destroy` in one sitting for demos.
 

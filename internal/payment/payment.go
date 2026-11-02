@@ -91,4 +91,6 @@ type Record struct {
 	Error     string    `json:"error,omitempty" dynamodbav:"error,omitempty"`
 	// DisputeCardID is only set on disputed txns; it keys the sparse dispute-index.
 	DisputeCardID string `json:"-" dynamodbav:"dispute_card_id,omitempty"`
+	// ExpiresAt is the DynamoDB TTL, in unix seconds. Disputed txns have none.
+	ExpiresAt int64 `json:"-" dynamodbav:"expires_at,omitempty"`
 }
