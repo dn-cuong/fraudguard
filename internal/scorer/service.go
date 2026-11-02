@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mit/fraudguard/internal/engine"
-	"github.com/mit/fraudguard/internal/payment"
+	"github.com/dn-cuong/fraudguard/internal/engine"
+	"github.com/dn-cuong/fraudguard/internal/payment"
 )
 
 type velocityStore interface {

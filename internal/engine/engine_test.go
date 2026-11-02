@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mit/fraudguard/internal/payment"
+	"github.com/dn-cuong/fraudguard/internal/payment"
 )
 
 func TestEvaluateAllow(t *testing.T) {

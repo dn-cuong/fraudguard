@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/dn-cuong/fraudguard/internal/payment"
 	"github.com/google/uuid"
-	"github.com/mit/fraudguard/internal/payment"
 )
 
 // Needs DynamoDB Local, see internal/lease/lease_test.go.

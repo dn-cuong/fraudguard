@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dn-cuong/fraudguard/internal/payment"
 	"github.com/google/uuid"
-	"github.com/mit/fraudguard/internal/payment"
 )
 
 func main() {

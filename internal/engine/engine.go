@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mit/fraudguard/internal/payment"
+	"github.com/dn-cuong/fraudguard/internal/payment"
 )
 
 type Config struct {

@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
-	"github.com/mit/fraudguard/internal/payment"
+	"github.com/dn-cuong/fraudguard/internal/payment"
 )
 
 type Config struct {
