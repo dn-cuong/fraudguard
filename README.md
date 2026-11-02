@@ -1,276 +1,85 @@
 # FraudGuard
 
+[![CI](https://github.com/dn-cuong/fraudguard/actions/workflows/ci.yml/badge.svg)](https://github.com/dn-cuong/fraudguard/actions/workflows/ci.yml)
+[![Security](https://github.com/dn-cuong/fraudguard/actions/workflows/security.yml/badge.svg)](https://github.com/dn-cuong/fraudguard/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**Real-time card fraud scoring on AWS: every payment gets `ALLOW`, `REVIEW` or `DECLINE` from a pool of stateless Go workers that share one view of each card.**
+
 ![FraudGuard system architecture](images/fraudguard_architecture.png)
 
-Distributed real-time fraud scoring pipeline on AWS. Payments enter through API Gateway into Kinesis; Go workers on EC2 apply shared rule checks using ElastiCache (Redis) velocity counters and DynamoDB transaction history, then expose the decision over `GET /payments/{txn_id}`.
+Payments enter through API Gateway into Kinesis. Go workers score them against velocity counters in Redis and card history in DynamoDB, and the client polls for the decision. Infrastructure is Terraform, workers are deployed with Ansible, and CloudWatch alarms on missing heartbeats and unscorable records.
 
-Decisions are `ALLOW`, `REVIEW` or `DECLINE`. Terraform for infra, Ansible to deploy the workers, CloudWatch alarms on worker heartbeats.
+> **Status:** a side project about what happens when several scorer replicas share state. It's rules only, no ML. Everything runs locally against Docker (Redis, DynamoDB Local, LocalStack Kinesis), and the Terraform validates, but it has **not been run on real AWS yet**.
 
-Side project to see what happens when a few scorer replicas share state. Just rules, no ML.
+## Quick start
 
----
-
-## Why stateless
-
-A single scorer can't take bursts, and if each replica counts velocity in its own memory they stop agreeing with each other. So the workers keep nothing locally. Counters are in Redis, history in DynamoDB, and the rules only look at `(payment, snapshot)`.
-
-Kinesis partition key is `card_id`, so one card always lands on the same shard. The pool scores a batch concurrently, so txns can be scored slightly out of order; the velocity counts allow for that (see Rules). Downside: a very busy card sits on one shard. Haven't tried it.
-
----
-
-## Architecture
-
-### Data path
-
-1. **Client → API Gateway** over HTTPS (`POST /payments`).
-2. **API Gateway → Kinesis** (`PutRecord`). Same `card_id` stays on one partition for ordering; different cards fan out across shards.
-3. **EC2 Go workers** poll shards and score through a goroutine pool + channel.
-4. **Shared state before decide**
-   - Redis / ElastiCache: velocity windows (`win:card:*`, `win:ip:*`)
-   - DynamoDB: durable history / dispute lookup
-5. **Rule engine** produces ALLOW / REVIEW / DECLINE and writes the txn record.
-6. **Client polls** `GET /payments/{txn_id}`
-   - `pending` while scoring
-   - `failed` if it couldn't be scored (with the reason)
-   - `scored` with `decision` + `score`
-7. **CloudWatch** `WorkerHeartbeat` metrics; missing heartbeats trip failover alarms.
-
-### Async ingest
-
-`POST /payments` returns quickly:
-
-```json
-{"status":"queued","txn_id":"...","poll":"/payments/..."}
-```
-
-That only means the event is on the stream. The decision comes from `GET /payments/{txn_id}` (DynamoDB GSI on `txn_id`). Local **score mode** can still return the decision inline for faster demos.
-
-> Note: the AWS/API Gateway deployment exposes `/payments` and `/payments/{txn_id}`, while the local ingest binary exposes the same flow under `/v1/payments` and `/v1/payments/{txn_id}` for convenience. The architecture diagram reflects the AWS path, and the local endpoints are a thin wrapper around the same pipeline.
-
-### Why Redis + DynamoDB
-
-| Store | Role |
-|-------|------|
-| **ElastiCache Redis** | Hot velocity counters with TTL (sub-ms reads under burst) |
-| **DynamoDB** | Durable txn history + dispute flag (system of record) |
-
-Scored txns expire after 90 days through DynamoDB TTL (`expires_at`). Disputed txns drop their TTL and are kept, so `HISTORY_DISPUTE` doesn't forget a card. TTL deletes are lazy, usually within a couple of days of expiry.
-
-**Key design.** The table is keyed `card_id` + `txn_id`, and polling goes through the `txn_id-index` GSI. Keying on `txn_id` alone would give strongly consistent polls and drop one GSI write, but marking a dispute needs the card as well, and per-card history (the base for any rule beyond velocity) would need its own GSI. So the key stays, at the cost of one extra index write per txn and polls that can lag the write by a moment.
-
-Replicas stay consistent because scoring depends on shared stores, not process-local RAM.
-
-Shards are shared between workers through leases in a small DynamoDB table (`internal/lease`). A worker takes its fair share of shards, renews the lease every few seconds, and if it dies the lease expires (30s) and another worker picks the shard up from the last checkpoint. There's no worker count to keep in sync anywhere, so you can add or remove hosts freely.
-
-- A batch is checkpointed only after every record in it has a result. A crash replays the batch; scoring is idempotent (Redis counts by `txn_id`, DynamoDB `Put` ignores a txn that's already stored), so replays are safe.
-- Workers start from the oldest record when a shard has no checkpoint, so payments that arrived before any worker was up still get scored.
-- After a reshard, a child shard starts only once its parent is fully read, so a card's newer events never get ahead of its older ones.
-- A failing score is retried 3 times. If it still fails, an `ERROR` record is stored, so the client sees `failed`, and the raw record goes to the dead letter table. Records that can't be parsed at all go there too. If either write fails, the batch isn't checkpointed and gets read again.
-- Dead letters are kept 14 days in `fraudguard-dead-letters`, keyed by shard and sequence number, with the error. The `fraudguard-dead-letters` alarm fires on any. Inspect them with `aws dynamodb scan --table-name fraudguard-dead-letters`.
-
----
-
-## Rules (v1)
-
-| Rule | Signal | Store |
-|------|--------|-------|
-| `AMOUNT_HIGH` | amount ≥ threshold (default $2500) | config |
-| `VELOCITY_CARD` | more than N txns / card / window | Redis |
-| `VELOCITY_IP` | more than N txns / IP / window | Redis |
-| `HISTORY_DISPUTE` | prior dispute on card | DynamoDB |
-
-Mark a scored txn as disputed (local ingest) so later payments on that card trip `HISTORY_DISPUTE`:
+Needs Docker and Go 1.26.10+. This runs the same path as AWS, with ingest → Kinesis → worker → DynamoDB, all in containers:
 
 ```bash
-curl -s -X POST http://localhost:8080/v1/payments/TXN_ID/dispute \
-  -H 'Content-Type: application/json' \
-  -d '{"card_id":"card-1"}'
+git clone https://github.com/dn-cuong/fraudguard && cd fraudguard
+make stack-smoke    # build images, start the stack, send a payment, poll until it's scored
 ```
 
-Each txn is counted in Redis with one atomic Lua call on a sorted set of txn_ids, and the count it gets back is what the rules see. So concurrent payments on one card each get a different count, and a redelivered record isn't counted twice.
-
-Windows run on arrival time (Kinesis arrival, or the ingest clock in score mode), not the time of scoring, so draining a backlog after an outage doesn't look like a burst. Client-supplied timestamps are ignored: they would let a caller dodge the velocity rules. Txns up to 1s apart still count each other when scored out of order. Payments without an `ip` skip `VELOCITY_IP`.
-
-Score stack: each rule adds its weight (`weight_*` in the config), ≥80 `DECLINE`, ≥40 `REVIEW`, else `ALLOW`. Rules are pure over `(payment, snapshot)` so any worker with the same snapshot scores the same way.
-
----
-
-## Layout
-
-| Path | Role |
-|------|------|
-| `cmd/ingest` | HTTP ingest (score mode or Kinesis put) + status poll |
-| `cmd/worker` | Kinesis consumer (goroutine pool) |
-| `cmd/loadgen` | TPS / p50 / p99 harness |
-| `internal/` | engine, velocity, history, stream, scorer, cloudwatch |
-| `config/` | `local.yaml`, `aws.yaml` |
-| `terraform/` | VPC, API Gateway, Kinesis, ElastiCache, DynamoDB, EC2, alarms |
-| `ansible/` | worker binary + systemd |
-| `images/` | architecture diagram |
-| `scripts/` | smoke / LocalStack helpers |
-
----
-
-## Local
-
-Needs Go 1.26.10+ and Docker Desktop.
+Then send your own:
 
 ```bash
-docker compose up -d redis dynamodb
-make build
-./bin/ingest -config config/local.yaml -mode score
+curl -s -X POST localhost:8080/v1/payments -H 'Content-Type: application/json' \
+  -d '{"card_id":"card-hot","amount":3000,"merchant":"Luxury","country":"US","ip":"9.9.9.9"}'
+# {"status":"queued","txn_id":"9f1c…","poll":"/v1/payments/9f1c…",…}
+
+curl -s localhost:8080/v1/payments/9f1c…
+# {"status":"scored","decision":"REVIEW","score":40,…}      AMOUNT_HIGH: 3000 ≥ 2500
 ```
 
-Or run the whole pipeline in containers (ingest in Kinesis mode → LocalStack → worker → DynamoDB Local), the same path as AWS:
+`make down` stops everything. For a faster loop without Kinesis, `make up && make ingest` scores inline and returns the decision straight from the `POST`.
 
-```bash
-make stack          # docker compose --profile full up -d --build
-make stack-smoke    # POST a payment and poll until a worker has scored it
-make down
-```
+## Features
 
-Normal payment (`ALLOW`):
+- **Consistent across replicas.** Workers keep nothing in memory. Counters live in Redis and history in DynamoDB, so any worker scores a payment the same way.
+- **Safe under replays and crashes.** Counting is atomic and per-txn idempotent, results are written once, and a batch is checkpointed only when every record in it has a result.
+- **Elastic workers.** Kinesis shards are shared through DynamoDB leases. Add or remove workers freely; a dead worker's shards are picked up from its last checkpoint after about 30s.
+- **Nothing silently lost.** Failing scores are retried, then stored as `failed` for the client, and the raw record goes to a dead-letter table with an alarm.
+- **Velocity on arrival time.** A backlog drained after an outage isn't mistaken for a fraud burst, and client-supplied timestamps are ignored.
+- **Configurable rules.** Thresholds and weights are YAML; the engine is pure, with no I/O, and unit-tested.
 
-```bash
-curl -s -X POST http://localhost:8080/v1/payments \
-  -H 'Content-Type: application/json' \
-  -d '{"card_id":"card-1","user_id":"u1","amount":42,"merchant":"Cafe","country":"US","ip":"1.2.3.4"}'
-```
+## Rules
 
-High amount (`REVIEW` / `AMOUNT_HIGH`):
+| Rule | Fires when | Default weight |
+|------|------------|---------------:|
+| `AMOUNT_HIGH` | amount ≥ $2,500 | 40 |
+| `VELOCITY_CARD` | more than 5 txns on the card in the last minute | 50 |
+| `VELOCITY_IP` | more than 20 txns from the IP in the last minute | 30 |
+| `HISTORY_DISPUTE` | the card has a disputed txn | 60 |
 
-```bash
-curl -s -X POST http://localhost:8080/v1/payments \
-  -H 'Content-Type: application/json' \
-  -d '{"card_id":"card-hot","user_id":"u2","amount":3000,"merchant":"Luxury","country":"US","ip":"9.9.9.9"}'
-```
+Weights add up: **≥ 80 `DECLINE`**, **≥ 40 `REVIEW`**, otherwise `ALLOW`. Every threshold and weight is in [`config/local.yaml`](config/local.yaml).
 
-Poll by `txn_id`:
+## API
 
-```bash
-curl -s http://localhost:8080/v1/payments/TXN_ID
-```
+| | Local ingest | AWS (API Gateway) |
+|---|---|---|
+| Submit a payment | `POST /v1/payments` | `POST /payments` |
+| Poll for the decision | `GET /v1/payments/{txn_id}` | `GET /payments/{txn_id}` |
+| Mark a txn disputed | `POST /v1/payments/{txn_id}/dispute` | not yet |
 
-Loadgen (1k TPS):
+A payment needs `card_id` and `amount`. `currency` (USD only), `user_id`, `merchant`, `country` and `ip` are optional. `txn_id` and `timestamp` are set by the server. Marking a dispute takes `{"card_id": "…"}`, the card the txn was on. Polling returns `pending` until a worker has scored the payment, then `scored` with `decision` and `score`, or `failed` with the reason.
 
-```bash
-./bin/loadgen -addr http://localhost:8080 -tps 1000 -duration 15s -workers 64
-```
+## Performance
 
-```bash
-make test   # engine, scorer, velocity, consumer, config
-# lease and history tests need DynamoDB Local, otherwise they skip:
-DYNAMO_TEST_ENDPOINT=http://localhost:8000 go test ./...
-make up     # redis + dynamodb-local
-make smoke  # POST payment then poll until scored
-make down
-```
+One local run on an Apple M3 Pro, scoring inline (`-mode score`, no Kinesis): 1,000 TPS for 15s, **p50 1.3 ms, p99 31 ms**, no errors. It says nothing about latency on AWS. Reproduce with `make ingest` and `make loadgen`.
 
-### Benchmarks
+Failover was checked locally with two workers on LocalStack: killed workers, reshards under load, Redis outages and payments sent before any worker was up were all scored. The details are in [docs/architecture.md](docs/architecture.md#failover-checked-locally).
 
-Local only: `-mode score` (inline scoring), redis and dynamodb-local in Docker on a Mac (Apple M3 Pro). `./bin/loadgen -tps 1000 -duration 15s -workers 64`:
+## Documentation
 
-| target TPS | achieved | errors | p50 | p99 |
-|-----------|----------|--------|-----|-----|
-| 1000 | 999 | 0 | 1.3 ms | 31 ms |
+- [Architecture](docs/architecture.md): data path, why stateless, storage design, leases and checkpoints, how velocity is counted, known limitations.
+- [Deploying to AWS](docs/aws.md): Terraform, Ansible, the client flow, cost and safety notes.
+- [Contributing](CONTRIBUTING.md): local checks, tests that need DynamoDB Local, what CI requires.
 
-One run, and it doesn't include Kinesis or API Gateway, so it says nothing about AWS latency.
+## Roadmap
 
-### Failover, checked locally
-
-Against LocalStack Kinesis + DynamoDB Local, with `bin/ingest -mode kinesis` and two `bin/worker` processes:
-
-- 20 payments sent while no worker was running were all scored once a worker started.
-- `kill -9` on one worker: its shard sat `pending` until the lease expired, then the other worker resumed from the checkpoint and all payments were scored.
-- Resharding 2 → 4 with traffic running: parents were read to the end first, then the 4 children; all payments scored.
-- Redis stopped: payments came back `failed` with the error, and scoring worked again once Redis was back.
-- SIGTERM: the worker hands its shards back, so the next worker takes them right away instead of waiting for the lease.
-
----
-
-## Known limitations
-
-- Not tested on real AWS yet, only Terraform validate plus the LocalStack run above.
-- Lease expiry uses each worker's own clock, so hosts need roughly synced time (chrony on the AL2023 AMI does this). The 30s lease is far above normal skew.
-- Deliveries are at-least-once. A replayed txn is counted at its original arrival time, so it can't inflate the current window.
-- A backlog that drains slower than real time can undercount: a card's Redis key expires on wall-clock time, so it can vanish between two of that card's txns.
-- The sliding window keeps one Redis entry per txn in the window, so a card or IP sending thousands of txns a minute costs memory until they age out.
-- If the DynamoDB write of a scored txn fails, the txn is retried and finally stored as `ERROR`, but its Redis counts stay.
-- USD only. Anything else is rejected, there's no FX.
-- Dispute lookup goes through a GSI, so a dispute shows up a moment after it's marked. Txns disputed before the `dispute-index` existed aren't in it.
-- SSH ingress is open by default, see Safety.
-- The AWS API has no auth, and the dispute endpoint exists only on the local ingest binary, so `HISTORY_DISPUTE` can't fire on AWS yet.
-- The heartbeat alarms have no `alarm_actions`: they change state but notify and replace nothing.
-
----
-
-## AWS
-
-Provisions API Gateway, Kinesis, ElastiCache, DynamoDB (transactions with `txn_id-index` and `dispute-index`, plus the lease and dead letter tables), EC2 workers, bastion, CloudWatch.
-
-**Cost:** NAT + ElastiCache dominate. Apply → smoke → `terraform destroy` in one sitting for demos.
-
-### 1. Tooling
-
-```bash
-brew install awscli terraform ansible
-aws configure --profile fraudguard
-export AWS_PROFILE=fraudguard
-aws sts get-caller-identity
-```
-
-### 2. Infra
-
-```bash
-cd terraform
-cp terraform.tfvars.example terraform.tfvars   # set key_name
-terraform init && terraform apply
-terraform output payments_url
-terraform output payment_status_url_template
-```
-
-### 3. Workers
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o bin/worker ./cmd/worker
-cd ansible
-cp inventory.example.yml inventory.yml         # from terraform outputs
-ansible-playbook -i inventory.yml site.yml --private-key ~/.ssh/fraudguard.pem
-```
-
-### 4. Client flow
-
-```bash
-BASE="$(cd terraform && terraform output -raw payments_url)"
-
-curl -s -X POST "$BASE" \
-  -H 'Content-Type: application/json' \
-  -d '{"card_id":"card-1","user_id":"u1","amount":42,"merchant":"Cafe","country":"US","ip":"1.2.3.4"}'
-# {"status":"queued","txn_id":"...","poll":"/payments/..."}
-
-curl -s "$BASE/TXN_ID"
-# {"status":"scored","decision":"ALLOW","score":0,...}
-```
-
-### 5. Teardown
-
-```bash
-cd terraform && terraform destroy
-```
-
----
-
-## Safety
-
-- Do not commit `.env`, real `*.tfvars`, access-key CSVs, or PEM keys
-- Set `ssh_ingress_cidr` in `terraform.tfvars` to your IP/32 before apply (default is open for demos)
-- Destroy idle stacks
-- Tag resources `Project=fraudguard`
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks and what CI requires.
+Planned work is tracked in [GitHub issues](https://github.com/dn-cuong/fraudguard/issues): authentication and throttling on the API, more rules with versioned rulesets and a shadow mode, a backtesting harness, latency histograms and tracing, card-ID tokenization, and moving workers to ECS Fargate.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)
