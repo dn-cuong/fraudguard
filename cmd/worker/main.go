@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -68,11 +69,25 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(rep.Snapshot())
 	})
+	metrics := &http.Server{
+		Addr:              *metricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() {
 		slog.Info("metrics listening", "addr", *metricsAddr)
-		if err := http.ListenAndServe(*metricsAddr, mux); err != nil && err != http.ErrServerClosed {
+		if err := metrics.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("metrics serve", "err", err)
 		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		_ = metrics.Shutdown(shutdownCtx)
 	}()
 
 	go func() {

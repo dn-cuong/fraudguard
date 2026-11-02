@@ -78,7 +78,7 @@ func TestScoreUsesReturnedCounts(t *testing.T) {
 func TestScoreCountsAtArrivalTime(t *testing.T) {
 	v, h := &fakeVel{}, &fakeHist{}
 	at := time.Unix(1_800_000_000, 0)
-	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{TxnID: "t", CardID: "c", Timestamp: at}); err != nil {
+	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{TxnID: "t", CardID: "c", Amount: 10, Timestamp: at}); err != nil {
 		t.Fatal(err)
 	}
 	if !v.at.Equal(at) {
@@ -100,7 +100,7 @@ func TestScoreSkipsIPVelocityWithoutIP(t *testing.T) {
 
 func TestScoreVelocityErrorWritesNothing(t *testing.T) {
 	v, h := &fakeVel{err: errors.New("boom")}, &fakeHist{}
-	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{CardID: "c"}); err == nil {
+	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{CardID: "c", Amount: 10}); err == nil {
 		t.Fatal("want error")
 	}
 	if len(h.puts) != 0 {
@@ -111,8 +111,8 @@ func TestScoreVelocityErrorWritesNothing(t *testing.T) {
 func TestScoreRejectsNonUSD(t *testing.T) {
 	v, h := &fakeVel{}, &fakeHist{}
 	_, err := newSvc(v, h).Score(context.Background(), payment.Payment{CardID: "c", Currency: "JPY", Amount: 3000})
-	if !errors.Is(err, ErrUnsupportedCurrency) {
-		t.Fatalf("want ErrUnsupportedCurrency, got %v", err)
+	if !errors.Is(err, payment.ErrInvalid) {
+		t.Fatalf("want ErrInvalid, got %v", err)
 	}
 	if v.hits != 0 {
 		t.Fatal("rejected payment must not touch counters")
@@ -123,7 +123,7 @@ func TestScoreRejectsNonUSD(t *testing.T) {
 // per-txn marker in Redis and gets the same count back.
 func TestScorePutFailureReturnsError(t *testing.T) {
 	v, h := &fakeVel{card: 1, ip: 1}, &fakeHist{putErr: errors.New("throttled")}
-	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{CardID: "c", IP: "i"}); err == nil {
+	if _, err := newSvc(v, h).Score(context.Background(), payment.Payment{CardID: "c", Amount: 10, IP: "1.1.1.1"}); err == nil {
 		t.Fatal("want error")
 	}
 }

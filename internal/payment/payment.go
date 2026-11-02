@@ -1,6 +1,16 @@
 package payment
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"net/netip"
+	"time"
+)
+
+// ErrInvalid marks a payment that can never be scored, so retrying is pointless.
+var ErrInvalid = errors.New("invalid payment")
+
+const maxFieldLen = 128
 
 // Payment is one authorization attempt entering the pipeline.
 type Payment struct {
@@ -13,6 +23,31 @@ type Payment struct {
 	Country   string    `json:"country" dynamodbav:"country"`
 	IP        string    `json:"ip" dynamodbav:"ip"`
 	Timestamp time.Time `json:"timestamp" dynamodbav:"timestamp"`
+}
+
+// Validate checks a payment at the trust boundary. Currency is USD only: the
+// amount rule compares against a USD threshold and there is no FX conversion.
+// An empty currency means USD.
+func (p Payment) Validate() error {
+	if p.CardID == "" || p.Amount <= 0 {
+		return fmt.Errorf("%w: card_id and amount required", ErrInvalid)
+	}
+	if p.Currency != "" && p.Currency != "USD" {
+		return fmt.Errorf("%w: only USD is supported", ErrInvalid)
+	}
+	if p.IP != "" {
+		if _, err := netip.ParseAddr(p.IP); err != nil {
+			return fmt.Errorf("%w: ip is not an IP address", ErrInvalid)
+		}
+	}
+	for name, v := range map[string]string{
+		"txn_id": p.TxnID, "card_id": p.CardID, "user_id": p.UserID, "merchant": p.Merchant, "country": p.Country,
+	} {
+		if len(v) > maxFieldLen {
+			return fmt.Errorf("%w: %s is longer than %d", ErrInvalid, name, maxFieldLen)
+		}
+	}
+	return nil
 }
 
 type Decision string
