@@ -43,7 +43,7 @@ Kinesis partition key is `card_id`, so one card always lands on the same shard a
 {"status":"queued","txn_id":"...","poll":"/payments/..."}
 ```
 
-That only means the event is on the stream. The decision comes from `GET /payments/{txn_id}` (DynamoDB GSI on `txn_id`). Local **score mode** can still return the decision inline for faster demos; polling works locally at `GET /v1/payments/{txn_id}` as well.
+That only means the event is on the stream. The decision comes from `GET /payments/{txn_id}` (DynamoDB GSI on `txn_id`). Local **score mode** can still return the decision inline for faster demos.
 
 > Note: the AWS/API Gateway deployment exposes `/payments` and `/payments/{txn_id}`, while the local ingest binary exposes the same flow under `/v1/payments` and `/v1/payments/{txn_id}` for convenience. The architecture diagram reflects the AWS path, and the local endpoints are a thin wrapper around the same pipeline.
 
@@ -253,6 +253,10 @@ cd terraform && terraform destroy
 - Set `ssh_ingress_cidr` in `terraform.tfvars` to your IP/32 before apply (default is open for demos)
 - Destroy idle stacks
 - Tag resources `Project=fraudguard`
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks and what CI requires.
 
 ## License
 

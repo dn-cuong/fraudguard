@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dn-cuong/fraudguard/internal/history"
 	"github.com/google/uuid"
-	"github.com/mit/fraudguard/internal/history"
 )
 
 // These run against DynamoDB Local. Set DYNAMO_TEST_ENDPOINT (CI does);

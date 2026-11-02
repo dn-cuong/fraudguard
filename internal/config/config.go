@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/mit/fraudguard/internal/engine"
-	"github.com/mit/fraudguard/internal/history"
+	"github.com/dn-cuong/fraudguard/internal/engine"
+	"github.com/dn-cuong/fraudguard/internal/history"
 	"gopkg.in/yaml.v3"
 )
 

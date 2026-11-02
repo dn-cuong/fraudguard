@@ -11,16 +11,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dn-cuong/fraudguard/internal/cloudwatchx"
+	"github.com/dn-cuong/fraudguard/internal/config"
+	"github.com/dn-cuong/fraudguard/internal/engine"
+	"github.com/dn-cuong/fraudguard/internal/heartbeat"
+	"github.com/dn-cuong/fraudguard/internal/history"
+	"github.com/dn-cuong/fraudguard/internal/lease"
+	"github.com/dn-cuong/fraudguard/internal/scorer"
+	"github.com/dn-cuong/fraudguard/internal/stream"
+	"github.com/dn-cuong/fraudguard/internal/velocity"
 	"github.com/google/uuid"
-	"github.com/mit/fraudguard/internal/cloudwatchx"
-	"github.com/mit/fraudguard/internal/config"
-	"github.com/mit/fraudguard/internal/engine"
-	"github.com/mit/fraudguard/internal/heartbeat"
-	"github.com/mit/fraudguard/internal/history"
-	"github.com/mit/fraudguard/internal/lease"
-	"github.com/mit/fraudguard/internal/scorer"
-	"github.com/mit/fraudguard/internal/stream"
-	"github.com/mit/fraudguard/internal/velocity"
 )
 
 func main() {

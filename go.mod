@@ -1,4 +1,4 @@
-module github.com/mit/fraudguard
+module github.com/dn-cuong/fraudguard
 
 go 1.25.13
 

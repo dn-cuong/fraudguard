@@ -7,9 +7,9 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
-	"github.com/mit/fraudguard/internal/lease"
-	"github.com/mit/fraudguard/internal/payment"
-	"github.com/mit/fraudguard/internal/scorer"
+	"github.com/dn-cuong/fraudguard/internal/lease"
+	"github.com/dn-cuong/fraudguard/internal/payment"
+	"github.com/dn-cuong/fraudguard/internal/scorer"
 )
 
 type fakeScorer struct {
