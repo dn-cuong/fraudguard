@@ -14,6 +14,7 @@ import (
 
 	"github.com/dn-cuong/fraudguard/internal/cloudwatchx"
 	"github.com/dn-cuong/fraudguard/internal/config"
+	"github.com/dn-cuong/fraudguard/internal/deadletter"
 	"github.com/dn-cuong/fraudguard/internal/engine"
 	"github.com/dn-cuong/fraudguard/internal/heartbeat"
 	"github.com/dn-cuong/fraudguard/internal/history"
@@ -50,11 +51,14 @@ func main() {
 	})
 	must(stream.EnsureStream(ctx, client, cfg.Kinesis.StreamName, 2))
 
-	leases := lease.New(history.NewClient(cfg.HistoryConfig()), cfg.LeaseTable, 30*time.Second)
+	ddb := history.NewClient(cfg.HistoryConfig())
+	leases := lease.New(ddb, cfg.LeaseTable, 30*time.Second)
 	must(leases.EnsureTable(ctx))
+	dead := deadletter.New(ddb, cfg.DeadLetterTable)
+	must(dead.EnsureTable(ctx))
 	// unique per process: a restarted worker must not be mistaken for the old one
 	owner := cfg.WorkerName + "-" + uuid.NewString()[:8]
-	worker := stream.NewConsumer(client, cfg.Kinesis.StreamName, owner, cfg.WorkerCount, leases, svc)
+	worker := stream.NewConsumer(client, cfg.Kinesis.StreamName, owner, cfg.WorkerCount, leases, svc, dead)
 	rep := heartbeat.New(cfg.WorkerName)
 	cw := cloudwatchx.New(ctx, cfg.Kinesis.Region, cfg.WorkerName)
 
@@ -93,6 +97,7 @@ func main() {
 	go func() {
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()
+		var deadSent int64
 		for {
 			select {
 			case <-ctx.Done():
@@ -101,6 +106,9 @@ func main() {
 				scored, errs, avgMs := worker.Stats()
 				rep.Set(scored, errs, avgMs)
 				cw.Beat(ctx)
+				dead := worker.DeadLettered()
+				cw.DeadLetters(ctx, dead-deadSent) // zeros too, so the alarm sees data
+				deadSent = dead
 				slog.Info("heartbeat", "scored", scored, "errors", errs, "avg_latency_ms", avgMs, "shards", worker.Owned())
 			}
 		}

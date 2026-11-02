@@ -55,6 +55,29 @@ resource "aws_dynamodb_table" "leases" {
   }
 }
 
+# records the worker could not score (internal/deadletter)
+resource "aws_dynamodb_table" "dead_letters" {
+  name         = "${var.project}-dead-letters"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "shard_id"
+  range_key    = "seq"
+
+  attribute {
+    name = "shard_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "seq"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+}
+
 resource "aws_elasticache_subnet_group" "redis" {
   name       = "${var.project}-redis"
   subnet_ids = aws_subnet.private[*].id
