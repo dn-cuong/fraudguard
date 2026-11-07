@@ -2,7 +2,7 @@
 
 Terraform provisions API Gateway, Kinesis, ElastiCache, DynamoDB (transactions with `txn_id-index` and `dispute-index`, plus the lease and dead-letter tables), EC2 workers, a bastion and CloudWatch alarms. Ansible installs the worker binary as a systemd service.
 
-> This path has passed `terraform validate` but has **not been applied to real AWS yet**. Expect to fix things on the first run.
+> This stack has been deployed and tested on real AWS, then destroyed to save cost.
 
 **Cost:** the NAT gateway and ElastiCache dominate. For a demo, apply, smoke-test and `terraform destroy` in one sitting.
 

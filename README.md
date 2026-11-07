@@ -6,11 +6,9 @@
 
 **Real-time card fraud scoring on AWS: every payment gets `ALLOW`, `REVIEW` or `DECLINE` from a pool of stateless Go workers that share one view of each card.**
 
-![FraudGuard system architecture](images/fraudguard_architecture.png)
-
 Payments enter through API Gateway into Kinesis. Go workers score them against velocity counters in Redis and card history in DynamoDB, and the client polls for the decision. Infrastructure is Terraform, workers are deployed with Ansible, and CloudWatch alarms on missing heartbeats and unscorable records.
 
-> **Status:** a side project about what happens when several scorer replicas share state. It's rules only, no ML. Everything runs locally against Docker (Redis, DynamoDB Local, LocalStack Kinesis), and the Terraform validates, but it has **not been run on real AWS yet**.
+> **Status:** a side project about what happens when several scorer replicas share state. It's rules only, no ML. It has been deployed and tested on real AWS with Terraform, then torn down to save cost, and everything also runs locally against Docker (Redis, DynamoDB Local, LocalStack Kinesis).
 
 ## Quick start
 
